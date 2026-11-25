@@ -511,6 +511,13 @@ class Service:
 
     # ------------------------------------------------------------------ Telegram
     async def handle_telegram(self, update: dict[str, Any]) -> None:
+        message = update.get("message") or {}
+        if (message.get("text") or "").strip().split("@")[0] == "/chatid":
+            # Помогает узнать TELEGRAM_CHAT_ID при настройке. Ничего, кроме id самого чата, не раскрывает.
+            chat_id = (message.get("chat") or {}).get("id")
+            if chat_id is not None:
+                await self._safe(self.tg.send_to(chat_id, f"ID этого чата: {chat_id}"))
+            return
         if "callback_query" in update:
             await self._on_callback(update["callback_query"])
         elif "message" in update:
@@ -588,7 +595,7 @@ class Service:
         if not self._from_our_chat(message.get("chat")):
             return
         command = (message.get("text") or "").strip()
-        if command.startswith(("/personal", "/bot")):
+        if command.startswith(("/personal", "/bot", "/forget")):
             await self._on_command(command)
             return
         reply_to = message.get("reply_to_message") or {}
@@ -626,6 +633,13 @@ class Service:
             if conv_row:
                 self._leave_to_artist(conv_row["id"], "personal")
             await self._tg_send(f"🔒 @{esc(username)} в личных контактах, бот не будет отвечать и хранить переписку.")
+        elif name == "/forget":
+            # Клиент попросил удалить его данные: удаляем диалог целиком, с файлами и историей.
+            if not conv_row:
+                await self._tg_send(f"Диалог с @{esc(username)} не найден, данных нет.")
+                return
+            await self.forget_conversation(conv_row["id"])
+            await self._tg_send(f"🗑 Данные @{esc(username)} удалены: переписка, фото, заявки и история для модели.")
         elif name == "/bot":
             self.db.execute("DELETE FROM personal_contacts WHERE key = ?", (f"user:{username}",))
             if not conv_row:
@@ -633,6 +647,11 @@ class Service:
                 return
             self.db.update_conversation(conv_row["id"], scope="tattoo", status="bot", needs_disclosure=True)
             await self._tg_send(f"🤖 Диалог с @{esc(username)} отдан боту, он ответит на следующее сообщение клиента.")
+
+    async def forget_conversation(self, conversation_id: int) -> None:
+        rows = self.db.all("SELECT attachments FROM messages WHERE conversation_id = ?", (conversation_id,))
+        await self._delete_files(self._file_ids(rows))
+        self.db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
 
     # ------------------------------------------------------------------ расход и алерты
     async def _record_usage(self, conversation_id: int, result: AgentResult) -> None:
@@ -743,6 +762,23 @@ class Service:
         self.db.execute("DELETE FROM conversations WHERE COALESCE(last_activity_at, created_at) < ?", (cutoff,))
         self.db.execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
         self.db.execute("DELETE FROM processed_events WHERE created_at < ?", (self.clock() - 7 * 86400,))
+
+    async def register_webhooks(self) -> None:
+        """При старте: webhook Telegram и подписка аккаунта Instagram. Повторный вызов безопасен."""
+        url = self.settings.public_url
+        if url and self.settings.telegram_bot_token and self.settings.telegram_webhook_secret:
+            try:
+                await self.tg.set_webhook(f"{url}/webhooks/telegram", self.settings.telegram_webhook_secret)
+                log.info("telegram webhook set")
+            except Exception:
+                log.exception("telegram setWebhook failed")
+        if self.settings.ig_access_token or self.db.kv_get("ig_token"):
+            try:
+                await self.ig.subscribe_app()
+                log.info("instagram account subscribed to webhooks")
+            except Exception as e:
+                log.exception("instagram subscribed_apps failed")
+                await self.alert(f"Не удалось подписать аккаунт Instagram на webhook: {esc(e)}")
 
     async def tick(self) -> None:
         """Вызывается раз в минуту планировщиком."""

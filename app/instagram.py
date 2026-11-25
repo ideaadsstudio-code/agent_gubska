@@ -184,6 +184,15 @@ class InstagramClient:
             log.warning("could not check conversation history for %s", user_id)
             return None
 
+    async def subscribe_app(self, fields: str = "messages,messaging_referral") -> None:
+        """Подписывает аккаунт мастера на webhook нашего приложения (идемпотентно)."""
+        resp = await self.http.post(
+            f"{self.base}/me/subscribed_apps",
+            params={"subscribed_fields": fields},
+            headers={"Authorization": f"Bearer {self._token()}"},
+        )
+        resp.raise_for_status()
+
     async def refresh_token(self) -> tuple[str, int]:
         """Обновляет долгий токен. Возвращает (новый токен, срок жизни в секундах)."""
         resp = await self.http.get(

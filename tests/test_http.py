@@ -106,3 +106,73 @@ async def test_had_messages_before_reads_only_dates():
     assert await ig.had_messages_before("1789", launch) is True
     assert requests[1].url.params["fields"] == "messages{created_time}"  # текст сообщений не запрашивается
     assert await ig.had_messages_before("1789", 1_700_000_000.0) is False
+
+
+def test_playground_off_without_token(env):
+    with make_client(env) as c:
+        assert c.get("/playground").status_code == 404
+        assert c.post("/playground/api/message", json={"token": "", "session": "s", "text": "hi"}).status_code == 403
+
+
+def test_playground_chat(env, settings):
+    from conftest import msg, text
+
+    settings.playground_token = "pg-secret"
+    env.claude.queue(msg(text("We do fine line!")))
+    with make_client(env) as c:
+        assert "Тестовый чат" in c.get("/playground").text
+        bad = c.post("/playground/api/message", json={"token": "nope", "session": "s1", "text": "hi"})
+        assert bad.status_code == 403
+        r = c.post("/playground/api/message", json={"token": "pg-secret", "session": "s1", "text": "Fine line?"})
+        data = r.json()
+    assert data["replies"][0].endswith("We do fine line!")
+    assert env.ig.sent == [] and env.tg.sent == []  # настоящие Instagram и Telegram не трогаются
+    assert env.db.spend_since(0) > 0  # расход попадает в общий бюджет
+
+
+def test_data_deletion_page(env):
+    with make_client(env) as c:
+        r = c.get("/data-deletion")
+    assert r.status_code == 200 and "delete my data" in r.text
+
+
+async def test_forget_command_deletes_everything(ienv):
+    from conftest import image, msg, text
+
+    ienv.claude.queue(msg(text("Nice!")))
+    await ienv.client_says("Like this", attachments=image())
+    ienv.db.update_conversation(ienv.conv().id, username="ink_lover")
+    await ienv.service.handle_telegram({"message": {"chat": {"id": -100}, "text": "/forget @ink_lover"}})
+    assert ienv.conv() is None
+    assert ienv.db.one("SELECT COUNT(*) AS n FROM messages")["n"] == 0
+    assert ienv.images.deleted == ["file_1"]
+
+
+async def test_chatid_command_answers_any_chat(env):
+    calls = []
+
+    async def send_to(chat_id, text):
+        calls.append((chat_id, text))
+
+    env.tg.send_to = send_to
+    await env.service.handle_telegram({"message": {"chat": {"id": -555}, "text": "/chatid"}})
+    assert calls == [(-555, "ID этого чата: -555")]
+
+
+async def test_register_webhooks(env, settings):
+    calls = []
+
+    async def set_webhook(url, secret):
+        calls.append(("tg", url, secret))
+
+    async def subscribe_app(fields="messages,messaging_referral"):
+        calls.append(("ig", fields))
+
+    settings.public_url = "https://bot.example"
+    settings.telegram_bot_token = "t"
+    settings.ig_access_token = "ig"
+    env.tg.set_webhook = set_webhook
+    env.ig.subscribe_app = subscribe_app
+    await env.service.register_webhooks()
+    assert ("tg", "https://bot.example/webhooks/telegram", "tg-secret") in calls
+    assert ("ig", "messages,messaging_referral") in calls

@@ -10,8 +10,7 @@ python -m pytest
 uvicorn app.main:create_app --factory --port 8000
 ```
 
-На хостинге команда запуска: `uvicorn app.main:create_app --factory --host 0.0.0.0 --port $PORT`.
-SQLite лежит в `DB_PATH`, для него нужен постоянный диск (volume).
+Развёртывание на Railway, подключение Telegram и Meta, анализ старой переписки: [docs/DEPLOY.md](docs/DEPLOY.md).
 
 ## Эндпоинты
 
@@ -20,10 +19,12 @@ SQLite лежит в `DB_PATH`, для него нужен постоянный 
 | `GET/POST /webhooks/instagram` | проверка и приём webhook Meta (подпись `X-Hub-Signature-256`) |
 | `POST /webhooks/telegram` | кнопки и ответы менеджера (заголовок `X-Telegram-Bot-Api-Secret-Token`) |
 | `GET /privacy` | публичная политика конфиденциальности для App Review |
+| `GET /data-deletion` | инструкция по удалению данных (требование Meta) |
+| `GET /playground?token=…` | тестовый чат с ботом без Instagram |
 | `GET /health` | проверка живости |
 
-Telegram webhook ставится один раз:
-`https://api.telegram.org/bot<TOKEN>/setWebhook?url=https://<домен>/webhooks/telegram&secret_token=<TELEGRAM_WEBHOOK_SECRET>`
+Webhook Telegram и подписку аккаунта Instagram сервер ставит сам при старте.
+Команды в Telegram-группе: `/chatid`, `/personal @ник`, `/bot @ник`, `/forget @ник`.
 
 ## Устройство
 
@@ -37,11 +38,13 @@ app/
   tools.py      escalate_to_manager, create_booking_request (strict-схемы)
   instagram.py  подпись, разбор webhook, отправка, обновление токена
   telegram.py   карточки и кнопки
+  playground.py тестовый чат в браузере
   language.py   раскрытие «это бот», слово human, шаблоны (код, не модель)
   db.py         SQLite
 prompts/system.md          системный промпт ({{KNOWLEDGE_BASE}} подставляется при старте)
 knowledge/knowledge_base.md база знаний, заполняется владельцем
-tests/                     82 сценария с фейками Claude, Instagram и Telegram
+scripts/analyze_export.py  анализ выгрузки переписки Instagram
+tests/                     92 сценария с фейками Claude, Instagram и Telegram
 ```
 
 ## Как это работает

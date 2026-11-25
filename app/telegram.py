@@ -59,6 +59,18 @@ class TelegramClient:
         result = await self._call("sendMessage", payload)
         return int(result.get("message_id", 0))
 
+    async def send_to(self, chat_id: int | str, text: str) -> None:
+        """Ответ в произвольный чат: нужен только для /chatid, пока TELEGRAM_CHAT_ID ещё не задан."""
+        await self._call("sendMessage", {"chat_id": chat_id, "text": text[:4096]})
+
+    async def set_webhook(self, url: str, secret: str) -> None:
+        await self._call("setWebhook", {
+            "url": url,
+            "secret_token": secret,
+            "allowed_updates": ["message", "callback_query"],
+            "drop_pending_updates": False,
+        })
+
     async def edit_markup(self, message_id: int, reply_markup: dict | None) -> None:
         await self._call(
             "editMessageReplyMarkup",

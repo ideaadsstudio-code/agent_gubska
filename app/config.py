@@ -60,6 +60,8 @@ class Settings:
     system_prompt_path: str = str(BASE_DIR / "prompts" / "system.md")
     knowledge_base_path: str = str(BASE_DIR / "knowledge" / "knowledge_base.md")
     studio_name: str = "the studio"
+    public_url: str = ""  # https://<домен>; на Railway берётся из RAILWAY_PUBLIC_DOMAIN
+    playground_token: str = ""  # пароль тестового чата /playground; пусто: страница выключена
     privacy_contact: str = ""
 
     @classmethod
@@ -92,4 +94,9 @@ class Settings:
         s.db_path = os.getenv("DB_PATH", s.db_path)
         s.studio_name = os.getenv("STUDIO_NAME", s.studio_name)
         s.privacy_contact = os.getenv("PRIVACY_CONTACT", "")
+        s.public_url = os.getenv("PUBLIC_URL", "")
+        if not s.public_url and os.getenv("RAILWAY_PUBLIC_DOMAIN"):
+            s.public_url = f"https://{os.environ['RAILWAY_PUBLIC_DOMAIN']}"
+        s.public_url = s.public_url.rstrip("/")
+        s.playground_token = os.getenv("PLAYGROUND_TOKEN", "")
         return s

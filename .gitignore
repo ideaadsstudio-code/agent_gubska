@@ -5,3 +5,6 @@ __pycache__/
 *.db-journal
 .pytest_cache/
 .venv/
+exports/
+analysis_out/
+*.zip

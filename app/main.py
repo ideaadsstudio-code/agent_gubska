@@ -18,6 +18,7 @@ from .config import Settings
 from .db import Database
 from .images import ImageStore
 from .instagram import InstagramClient, verify_signature
+from .playground import build_router as build_playground
 from .service import Service
 from .telegram import TelegramClient, esc
 
@@ -25,6 +26,7 @@ log = logging.getLogger(__name__)
 
 
 def build_service(settings: Settings) -> Service:
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     db = Database(settings.db_path)
     # ANTHROPIC_API_KEY читается SDK из окружения.
     client = anthropic.AsyncAnthropic(max_retries=2)
@@ -51,6 +53,8 @@ def create_app(settings: Settings | None = None, service: Service | None = None,
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
+        if run_scheduler:
+            await service.register_webhooks()
         task = asyncio.create_task(_scheduler(service)) if run_scheduler else None
         yield
         if task:
@@ -59,6 +63,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None,
 
     app = FastAPI(title="Tattoo Instagram agent", lifespan=lifespan)
     app.state.service = service
+    app.include_router(build_playground(settings, service.agent, service.classifier, service.db))
 
     @app.get("/health")
     async def health():
@@ -96,6 +101,22 @@ def create_app(settings: Settings | None = None, service: Service | None = None,
             raise HTTPException(status_code=403, detail="bad secret")
         await service.handle_telegram(await request.json())
         return {"ok": True}
+
+    @app.get("/data-deletion", response_class=HTMLResponse)
+    async def data_deletion():
+        contact = f" or email {esc(settings.privacy_contact)}" if settings.privacy_contact else ""
+        return f"""<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Data Deletion</title>
+<style>body{{font-family:system-ui,sans-serif;max-width:720px;margin:2rem auto;padding:0 16px;line-height:1.55}}</style>
+</head><body>
+<h1>How to delete your data</h1>
+<p>{esc(settings.studio_name)} keeps your Instagram conversation with us for up to {settings.retention_days} days, then deletes it automatically.</p>
+<p>To delete it sooner, send us a Direct message on Instagram saying "delete my data"{contact}.
+A person from the studio will delete your conversation, the images you sent and any booking request within 30 days
+and confirm it to you.</p>
+<p>If you delete a single message in Instagram, we delete our copy of it automatically.</p>
+<p>See also our <a href="/privacy">Privacy Policy</a>.</p>
+</body></html>"""
 
     @app.get("/privacy", response_class=HTMLResponse)
     async def privacy():
