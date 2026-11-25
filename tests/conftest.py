@@ -220,3 +220,35 @@ def timeout_error() -> anthropic.APITimeoutError:
 
 def dumps(obj: Any) -> bytes:
     return json.dumps(obj).encode()
+
+
+class FakeImages:
+    """Заменяет ImageStore: «скачивает» и «загружает» без сети."""
+
+    def __init__(self):
+        self.uploaded: list[str] = []
+        self.deleted: list[str] = []
+        self.fail_urls: set[str] = set()
+        self._ids = itertools.count(1)
+
+    async def ingest(self, url: str, name: str) -> str | None:
+        if url in self.fail_urls:
+            raise RuntimeError("cdn 404")
+        file_id = f"file_{next(self._ids)}"
+        self.uploaded.append(file_id)
+        return file_id
+
+    async def delete(self, file_id: str) -> None:
+        self.deleted.append(file_id)
+
+
+@pytest.fixture
+def ienv(settings) -> Env:
+    e = Env(settings)
+    e.images = FakeImages()
+    e.service.images = e.images
+    return e
+
+
+def image(url: str = "https://cdn.example/ref.jpg") -> list[dict]:
+    return [{"type": "image", "payload": {"url": url}}]

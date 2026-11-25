@@ -38,6 +38,7 @@ class Settings:
 
     # Поведение
     approval_mode: bool = True
+    attach_images: bool = True  # показывать модели фото-референсы клиента
     debounce_seconds: float = 4.0
     disclosure_pause_hours: int = 24
     reply_window_hours: int = 24
@@ -69,6 +70,7 @@ class Settings:
         s.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         s.telegram_webhook_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
         s.approval_mode = _bool("APPROVAL_MODE", s.approval_mode)
+        s.attach_images = _bool("ATTACH_IMAGES", s.attach_images)
         s.debounce_seconds = float(os.getenv("DEBOUNCE_SECONDS", s.debounce_seconds))
         s.retention_days = int(os.getenv("RETENTION_DAYS", s.retention_days))
         s.monthly_budget_usd = float(os.getenv("MONTHLY_BUDGET_USD", s.monthly_budget_usd))

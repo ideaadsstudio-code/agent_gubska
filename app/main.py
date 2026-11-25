@@ -15,6 +15,7 @@ from fastapi.responses import HTMLResponse, PlainTextResponse
 from .agent import Agent, load_system_prompt
 from .config import Settings
 from .db import Database
+from .images import ImageStore
 from .instagram import InstagramClient, verify_signature
 from .service import Service
 from .telegram import TelegramClient, esc
@@ -29,7 +30,8 @@ def build_service(settings: Settings) -> Service:
     agent = Agent(settings, client, load_system_prompt(settings))
     ig = InstagramClient(lambda: db.kv_get("ig_token") or settings.ig_access_token, settings.graph_api_version)
     tg = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
-    return Service(settings, db, agent, ig, tg)
+    images = ImageStore(client, settings.retention_days) if settings.attach_images else None
+    return Service(settings, db, agent, ig, tg, images=images)
 
 
 async def _scheduler(service: Service) -> None:

@@ -364,7 +364,7 @@ async def test_purge_after_retention(env):
     env.claude.queue(msg(text("Hello")))
     await env.client_says("Hi")
     env.clock.advance(hours=24 * 91)
-    env.service.purge()
+    await env.service.purge()
     assert env.conv() is None
     assert env.db.one("SELECT COUNT(*) AS n FROM messages")["n"] == 0
 

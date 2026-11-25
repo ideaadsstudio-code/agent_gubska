@@ -13,6 +13,7 @@ from . import language
 from .agent import Agent, AgentError, AgentResult
 from .config import Settings
 from .db import Conversation, Database
+from .images import ImageStore
 from .instagram import IncomingEvent, InstagramClient, parse_webhook, split_text
 from .telegram import TelegramClient, conversation_buttons, draft_buttons, esc
 
@@ -21,6 +22,7 @@ log = logging.getLogger(__name__)
 URGENCY_LABEL = {"high": "🔴 СРОЧНО", "normal": "🟡 обычная", "low": "⚪ не срочно"}
 FAILURE_PLACEHOLDER = "(No reply was generated because of a technical error. The conversation was handed to the manager.)"
 DELETED_PLACEHOLDER = "[message deleted by the client]"
+IMAGE_REMOVED_PLACEHOLDER = "[image removed]"
 
 
 def _utc(ts: float) -> datetime:
@@ -36,6 +38,7 @@ class Service:
         ig: InstagramClient,
         tg: TelegramClient,
         clock: Callable[[], float] = time.time,
+        images: ImageStore | None = None,
     ):
         self.settings = settings
         self.db = db
@@ -43,6 +46,8 @@ class Service:
         self.ig = ig
         self.tg = tg
         self.clock = clock
+        self.images = images
+        self._uploading: dict[int, int] = {}
         self._locks: dict[int, asyncio.Lock] = {}
         self._generation: dict[int, int] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -79,7 +84,7 @@ class Service:
     async def _on_client_message(self, ev: IncomingEvent) -> None:
         conv = self.db.get_or_create_conversation(ev.client_id)
         ts = ev.timestamp or self.clock()
-        self.db.add_message(conv.id, "client", ev.text, mid=ev.mid, attachments=ev.attachments, created_at=ts)
+        row_id = self.db.add_message(conv.id, "client", ev.text, mid=ev.mid, attachments=ev.attachments, created_at=ts)
         fields: dict[str, Any] = {"last_client_msg_at": ts, "last_activity_at": ts}
         pause = self.settings.disclosure_pause_hours * 3600
         if conv.llm_history and conv.last_activity_at and ts - conv.last_activity_at > pause:
@@ -87,7 +92,32 @@ class Service:
         self.db.update_conversation(conv.id, **fields)
         if not conv.username:
             self._spawn(self._fetch_username(conv.id, ev.client_id))
-        self._schedule(conv.id)
+        if self.images and any(a.get("type") == "image" and a.get("url") for a in ev.attachments):
+            # Пока картинка загружается, ход не начинается: задача загрузки сама запланирует ответ.
+            self._uploading[conv.id] = self._uploading.get(conv.id, 0) + 1
+            self._spawn(self._ingest_images(conv.id, row_id, ev.attachments))
+        else:
+            self._schedule(conv.id)
+
+    async def _ingest_images(self, conversation_id: int, row_id: int, attachments: list[dict]) -> None:
+        assert self.images
+        try:
+            for i, a in enumerate(attachments):
+                if a.get("type") != "image" or not a.get("url"):
+                    continue
+                try:
+                    file_id = await self.images.ingest(a["url"], f"ref_{conversation_id}_{row_id}_{i}")
+                except Exception:
+                    log.exception("image ingest failed")
+                    file_id = None
+                if file_id:
+                    a["file_id"] = file_id
+            self.db.execute(
+                "UPDATE messages SET attachments = ? WHERE id = ?", (json.dumps(attachments, ensure_ascii=False), row_id)
+            )
+        finally:
+            self._uploading[conversation_id] -= 1
+            self._schedule(conversation_id)
 
     async def _fetch_username(self, conversation_id: int, ig_user_id: str) -> None:
         username = await self.ig.get_username(ig_user_id)
@@ -143,21 +173,42 @@ class Service:
         if not row:
             return
         self.db.execute("DELETE FROM messages WHERE id = ?", (row["id"],))
-        text = row["text"]
-        if not text:
+        file_ids = self._file_ids([row])
+        await self._delete_files(file_ids)
+        self._redact(row["conversation_id"], file_ids, [row["text"]] if row["text"] else [])
+
+    @staticmethod
+    def _file_ids(rows) -> set[str]:
+        return {a["file_id"] for r in rows for a in json.loads(r["attachments"] or "[]") if a.get("file_id")}
+
+    async def _delete_files(self, file_ids: set[str]) -> None:
+        if not self.images:
             return
-        conv = self.db.get_conversation(row["conversation_id"])
-        if not conv:
+        for file_id in file_ids:
+            try:
+                await self.images.delete(file_id)
+            except Exception:
+                log.exception("could not delete file %s", file_id)
+
+    def _redact(self, conversation_id: int, file_ids: set[str], texts: list[str]) -> None:
+        """Единственное место, где история редактируется: удаление по запросу Meta и срок хранения.
+        Блоки thinking после правки API отбрасывает сам (drop_block)."""
+        conv = self.db.get_conversation(conversation_id)
+        if not conv or (not file_ids and not texts):
             return
-        # Единственное место, где история редактируется. Блоки thinking после правки отбросит API (drop_block).
         history = conv.llm_history
         for message in history:
             if message["role"] != "user" or not isinstance(message["content"], list):
                 continue
-            for block in message["content"]:
-                if block.get("type") == "text" and text in block.get("text", ""):
-                    block["text"] = block["text"].replace(text, DELETED_PLACEHOLDER)
-        notes = [n.replace(text, DELETED_PLACEHOLDER) for n in conv.pending_notes]
+            for i, block in enumerate(message["content"]):
+                if block.get("type") == "text":
+                    for t in texts:
+                        block["text"] = block["text"].replace(t, DELETED_PLACEHOLDER)
+                elif block.get("type") == "image" and block.get("source", {}).get("file_id") in file_ids:
+                    message["content"][i] = {"type": "text", "text": IMAGE_REMOVED_PLACEHOLDER}
+        notes = list(conv.pending_notes)
+        for t in texts:
+            notes = [n.replace(t, DELETED_PLACEHOLDER) for n in notes]
         self.db.update_conversation(conv.id, llm_history=history, pending_notes=notes)
 
     # ------------------------------------------------------------------ основной ход
@@ -166,6 +217,8 @@ class Service:
             conv = self.db.get_conversation(conversation_id)
             if conv is None:
                 return
+            if self._uploading.get(conversation_id):
+                return  # ответ запланирует загрузка картинки, когда закончит
             rows = self.db.unprocessed_client_messages(conversation_id)
             if not rows:
                 return
@@ -237,9 +290,18 @@ class Service:
             lines.append("")
         received = _utc(rows[-1]["created_at"]).strftime("%A %Y-%m-%d %H:%M UTC")
         lines.append(f"[Client messages, received {received}]")
+        content: list[dict[str, Any]] = []
         for r in rows:
             lines.append(self._row_text(r))
-        return [{"type": "text", "text": "\n".join(lines)}]
+            file_ids = [a["file_id"] for a in json.loads(r["attachments"] or "[]") if a.get("file_id")]
+            if file_ids:
+                # Картинка идёт сразу за своей подписью, чтобы модель понимала, к чему она.
+                content.append({"type": "text", "text": "\n".join(lines)})
+                content.extend({"type": "image", "source": {"type": "file", "file_id": f}} for f in file_ids)
+                lines = []
+        if lines:
+            content.append({"type": "text", "text": "\n".join(lines)})
+        return content
 
     def _with_disclosure(self, conv: Conversation, reply: str, lang: str) -> str:
         fresh = self.db.get_conversation(conv.id) or conv
@@ -559,9 +621,20 @@ class Service:
                 left = max(0, int((expires_at - now) // 86400))
                 await self.alert(f"Токен Instagram истекает через {left} дн. Обновите IG_ACCESS_TOKEN.")
 
-    def purge(self) -> None:
-        """Хранение 90 дней: старые диалоги удаляются целиком вместе с историей для модели."""
+    async def purge(self) -> None:
+        """Хранение 90 дней: старые диалоги удаляются целиком вместе с историей для модели и файлами."""
         cutoff = self.clock() - self.settings.retention_days * 86400
+        old_convs = {r["id"] for r in self.db.all(
+            "SELECT id FROM conversations WHERE COALESCE(last_activity_at, created_at) < ?", (cutoff,)
+        )}
+        old_rows = self.db.all(
+            "SELECT conversation_id, attachments FROM messages WHERE created_at < ? OR conversation_id IN "
+            "(SELECT id FROM conversations WHERE COALESCE(last_activity_at, created_at) < ?)", (cutoff, cutoff)
+        )
+        await self._delete_files(self._file_ids(old_rows))
+        for cid in {r["conversation_id"] for r in old_rows} - old_convs:
+            # Активный диалог: старые картинки убираются из истории, иначе запрос сослался бы на удалённый файл.
+            self._redact(cid, self._file_ids([r for r in old_rows if r["conversation_id"] == cid]), [])
         self.db.execute("DELETE FROM conversations WHERE COALESCE(last_activity_at, created_at) < ?", (cutoff,))
         self.db.execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
         self.db.execute("DELETE FROM processed_events WHERE created_at < ?", (self.clock() - 7 * 86400,))
@@ -575,5 +648,5 @@ class Service:
             await self.daily_summary()
         if self.db.kv_get("maintenance_day") != day:
             self.db.kv_set("maintenance_day", day)
-            self.purge()
+            await self.purge()
             await self.check_token()

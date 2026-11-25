@@ -52,7 +52,7 @@ ANTHROPIC_API_KEY, IG_APP_SECRET, IG_ACCESS_TOKEN, IG_VERIFY_TOKEN, TELEGRAM_BOT
 - Автовозврат бота после молчания менеджера: только по кнопке или через 24 ч (не решено).
 
 ## Статус
-Скелет готов (см. README.md): webhook, ядро агента, адаптеры Instagram и Telegram, SQLite, режим одобрения, 52 теста (`python -m pytest`).
+Скелет готов (см. README.md): webhook, ядро агента, адаптеры Instagram и Telegram, SQLite, режим одобрения, фото-референсы через Files API, 61 тест (`python -m pytest`).
 История диалога для модели только дописывается: не менять system, tools и прошлые сообщения, события между ходами передавать заметками.
 
 ## Следующий шаг
