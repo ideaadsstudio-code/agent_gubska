@@ -85,3 +85,24 @@ async def test_real_sdk_accepts_request(settings):
     assert "server-side-fallback-2026-07-01" in seen["beta"]
     assert "thinking-binding-controls-2026-08-01" in seen["beta"]
     assert result.new_messages[-1]["content"][0] == {"type": "thinking", "thinking": "", "signature": "s"}
+
+
+async def test_had_messages_before_reads_only_dates():
+    from app.instagram import InstagramClient
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path.endswith("/me/conversations"):
+            return httpx.Response(200, json={"data": [{"id": "conv_1"}]})
+        return httpx.Response(200, json={"messages": {"data": [
+            {"id": "m2", "created_time": "2026-12-02T10:00:00+0000"},
+            {"id": "m1", "created_time": "2025-05-01T10:00:00+0000"},
+        ]}})
+
+    ig = InstagramClient(lambda: "tok", http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    launch = 1_795_000_000.0  # ноябрь 2026
+    assert await ig.had_messages_before("1789", launch) is True
+    assert requests[1].url.params["fields"] == "messages{created_time}"  # текст сообщений не запрашивается
+    assert await ig.had_messages_before("1789", 1_700_000_000.0) is False

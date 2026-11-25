@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+from datetime import datetime
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -24,12 +25,17 @@ def verify_signature(app_secret: str, body: bytes, header: str | None) -> bool:
 
 @dataclass
 class IncomingEvent:
-    kind: str  # message | echo | deleted
+    kind: str  # message | echo | deleted | referral
     client_id: str  # IGSID клиента
     mid: str
     text: str = ""
     attachments: list[dict[str, Any]] = field(default_factory=list)
     timestamp: float = 0.0  # секунды
+    from_ad: bool = False  # клиент пришёл из рекламы «Написать в Direct»
+
+
+def _is_ad(referral: dict[str, Any] | None) -> bool:
+    return bool(referral) and (referral.get("source") == "ADS" or bool(referral.get("ad_id")))
 
 
 def parse_webhook(payload: dict[str, Any]) -> list[IncomingEvent]:
@@ -40,11 +46,16 @@ def parse_webhook(payload: dict[str, Any]) -> list[IncomingEvent]:
     for entry in payload.get("entry", []):
         for item in entry.get("messaging", []):
             message = item.get("message")
-            if not message or not message.get("mid"):
-                continue
             ts = float(item.get("timestamp", 0)) / 1000.0
             sender = str(item.get("sender", {}).get("id", ""))
             recipient = str(item.get("recipient", {}).get("id", ""))
+            if not message and _is_ad(item.get("referral")):
+                # Клиент открыл Direct из рекламы, но ещё ничего не написал.
+                events.append(IncomingEvent("referral", client_id=sender, mid=f"ref:{sender}:{int(ts)}",
+                                            timestamp=ts, from_ad=True))
+                continue
+            if not message or not message.get("mid"):
+                continue
             if message.get("is_deleted"):
                 events.append(IncomingEvent("deleted", client_id=sender, mid=message["mid"], timestamp=ts))
                 continue
@@ -63,7 +74,8 @@ def parse_webhook(payload: dict[str, Any]) -> list[IncomingEvent]:
                 attachments.append({"type": "unsupported", "url": ""})
             events.append(
                 IncomingEvent("message", client_id=sender, mid=message["mid"], text=message.get("text", ""),
-                              attachments=attachments, timestamp=ts)
+                              attachments=attachments, timestamp=ts,
+                              from_ad=_is_ad(message.get("referral")) or _is_ad(item.get("referral")))
             )
     return events
 
@@ -141,6 +153,35 @@ class InstagramClient:
             return data.get("username") or data.get("name")
         except Exception:  # профиль не критичен
             log.info("could not fetch profile for %s", user_id)
+            return None
+
+    async def had_messages_before(self, user_id: str, before_ts: float) -> bool | None:
+        """Была ли переписка с этим человеком до запуска бота. Читаем только даты сообщений, без текста.
+        None, если API не ответил."""
+        headers = {"Authorization": f"Bearer {self._token()}"}
+        try:
+            resp = await self.http.get(
+                f"{self.base}/me/conversations",
+                params={"platform": "instagram", "user_id": user_id},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            conversations = resp.json().get("data", [])
+            if not conversations:
+                return False
+            resp = await self.http.get(
+                f"{self.base}/{conversations[0]['id']}",
+                params={"fields": "messages{created_time}"},
+                headers=headers,
+            )
+            resp.raise_for_status()
+            for m in (resp.json().get("messages") or {}).get("data", []):
+                created = datetime.strptime(m["created_time"], "%Y-%m-%dT%H:%M:%S%z").timestamp()
+                if created < before_ts:
+                    return True
+            return False
+        except Exception:
+            log.warning("could not check conversation history for %s", user_id)
             return None
 
     async def refresh_token(self) -> tuple[str, int]:

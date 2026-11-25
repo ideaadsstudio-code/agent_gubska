@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     ig_user_id TEXT NOT NULL UNIQUE,
     username TEXT,
     status TEXT NOT NULL DEFAULT 'bot',          -- bot | manager
+    scope TEXT NOT NULL DEFAULT 'unknown',       -- unknown | tattoo | personal | ignored
     needs_disclosure INTEGER NOT NULL DEFAULT 1,
     last_client_msg_at REAL,
     last_activity_at REAL,
@@ -68,6 +69,9 @@ CREATE TABLE IF NOT EXISTS usage (
     cost_usd REAL NOT NULL,
     created_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS personal_contacts (
+    key TEXT PRIMARY KEY                         -- id:<IGSID> или user:<username>
+);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -81,6 +85,7 @@ class Conversation:
     ig_user_id: str
     username: str | None
     status: str
+    scope: str
     needs_disclosure: bool
     last_client_msg_at: float | None
     last_activity_at: float | None
@@ -97,6 +102,7 @@ def _conv(row: sqlite3.Row | None) -> Conversation | None:
         ig_user_id=row["ig_user_id"],
         username=row["username"],
         status=row["status"],
+        scope=row["scope"],
         needs_disclosure=bool(row["needs_disclosure"]),
         last_client_msg_at=row["last_client_msg_at"],
         last_activity_at=row["last_activity_at"],
@@ -221,6 +227,20 @@ class Database:
             (conversation_id, limit),
         )
         return list(reversed(rows))
+
+    # ---- личные контакты мастера: бот их не трогает ----
+    def is_personal_contact(self, ig_user_id: str, username: str | None) -> bool:
+        keys = [f"id:{ig_user_id}"] + ([f"user:{username.lower().lstrip('@')}"] if username else [])
+        return any(self.one("SELECT 1 FROM personal_contacts WHERE key = ?", (k,)) for k in keys)
+
+    def add_personal_contact(self, key: str) -> None:
+        self.execute("INSERT OR IGNORE INTO personal_contacts(key) VALUES (?)", (key,))
+
+    def forget_conversation_content(self, conversation_id: int) -> None:
+        """Диалог не про тату: не храним из него ни текста, ни истории."""
+        self.execute("DELETE FROM messages WHERE conversation_id = ?", (conversation_id,))
+        self.execute("DELETE FROM drafts WHERE conversation_id = ?", (conversation_id,))
+        self.update_conversation(conversation_id, llm_history=[], pending_notes=[], username=None)
 
     # ---- kv ----
     def kv_get(self, key: str, default: str | None = None) -> str | None:

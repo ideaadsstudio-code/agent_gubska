@@ -13,6 +13,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse, PlainTextResponse
 
 from .agent import Agent, load_system_prompt
+from .classifier import TopicClassifier
 from .config import Settings
 from .db import Database
 from .images import ImageStore
@@ -31,7 +32,8 @@ def build_service(settings: Settings) -> Service:
     ig = InstagramClient(lambda: db.kv_get("ig_token") or settings.ig_access_token, settings.graph_api_version)
     tg = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
     images = ImageStore(client, settings.retention_days) if settings.attach_images else None
-    return Service(settings, db, agent, ig, tg, images=images)
+    classifier = TopicClassifier(client, settings.classifier_model) if settings.topic_filter else None
+    return Service(settings, db, agent, ig, tg, images=images, classifier=classifier)
 
 
 async def _scheduler(service: Service) -> None:
@@ -116,6 +118,9 @@ We do not use your messages to train AI models.</p>
 <h2>Retention and deletion</h2>
 <p>Conversations are kept for up to {settings.retention_days} days and then deleted. If you delete a message in Instagram,
 we delete it from our records. You can ask us to delete your data at any time by messaging us.</p>
+<h2>Personal conversations</h2>
+<p>The assistant answers only conversations about tattoo services. Other conversations with the artist are not answered
+by the assistant and their content is not stored. The first messages of a new conversation are checked automatically to decide this.</p>
 <h2>Payments</h2>
 <p>We never ask for card numbers or identity documents in chat.</p>
 {contact}

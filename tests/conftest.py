@@ -75,6 +75,9 @@ class FakeIG:
         self.fail = False
         self.refresh_result: tuple[str, int] | Exception = ("new-token", 60 * 86400)
         self._ids = itertools.count(1)
+        self.username = "ink_lover"
+        self.existing_contact: bool | None = False
+        self.history_checks = 0
 
     async def send_text(self, recipient_id: str, text: str) -> str:
         if self.fail:
@@ -83,7 +86,11 @@ class FakeIG:
         return f"out_{next(self._ids)}"
 
     async def get_username(self, user_id: str) -> str | None:
-        return "ink_lover"
+        return self.username
+
+    async def had_messages_before(self, user_id: str, before_ts: float) -> bool | None:
+        self.history_checks += 1
+        return self.existing_contact
 
     async def refresh_token(self) -> tuple[str, int]:
         if isinstance(self.refresh_result, Exception):
@@ -137,6 +144,7 @@ def settings(tmp_path) -> Settings:
         telegram_chat_id="-100",
         telegram_webhook_secret="tg-secret",
         approval_mode=False,
+        topic_filter=False,  # фильтр тем проверяется отдельно в test_topic_filter.py
         debounce_seconds=0,
         db_path=str(tmp_path / "test.db"),
         system_prompt_path=str(ROOT / "prompts" / "system.md"),
@@ -157,7 +165,7 @@ class Env:
         self._mid = itertools.count(1)
 
     def payload(self, text: str = "", kind: str = "message", mid: str | None = None,
-                attachments: list[dict] | None = None, deleted: bool = False) -> dict:
+                attachments: list[dict] | None = None, deleted: bool = False, referral: dict | None = None) -> dict:
         mid = mid or f"m_{next(self._mid)}"
         message: dict[str, Any] = {"mid": mid}
         if text:
@@ -166,6 +174,8 @@ class Env:
             message["attachments"] = attachments
         if deleted:
             message["is_deleted"] = True
+        if referral:
+            message["referral"] = referral
         if kind == "echo":
             message["is_echo"] = True
             sender, recipient = OUR_ID, CLIENT_ID
@@ -252,3 +262,24 @@ def ienv(settings) -> Env:
 
 def image(url: str = "https://cdn.example/ref.jpg") -> list[dict]:
     return [{"type": "image", "payload": {"url": url}}]
+
+
+def topic(t: str) -> BetaMessage:
+    """Ответ классификатора темы."""
+    return msg(text(json.dumps({"topic": t})), model="claude-haiku-5-5",
+               usage={"input_tokens": 300, "output_tokens": 10,
+                      "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0})
+
+
+@pytest.fixture
+def fenv(settings) -> Env:
+    """Окружение с включённым фильтром «только тату»."""
+    from app.classifier import TopicClassifier
+
+    settings.topic_filter = True
+    e = Env(settings)
+    e.haiku = FakeClaude()
+    e.service.classifier = TopicClassifier(e.haiku)
+    e.images = FakeImages()
+    e.service.images = e.images
+    return e

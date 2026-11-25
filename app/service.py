@@ -11,6 +11,7 @@ from typing import Any, Callable
 
 from . import language
 from .agent import Agent, AgentError, AgentResult
+from .classifier import TopicClassifier
 from .config import Settings
 from .db import Conversation, Database
 from .images import ImageStore
@@ -39,6 +40,7 @@ class Service:
         tg: TelegramClient,
         clock: Callable[[], float] = time.time,
         images: ImageStore | None = None,
+        classifier: TopicClassifier | None = None,
     ):
         self.settings = settings
         self.db = db
@@ -47,7 +49,13 @@ class Service:
         self.tg = tg
         self.clock = clock
         self.images = images
-        self._uploading: dict[int, int] = {}
+        self.classifier = classifier
+        if not settings.bot_launch_at:
+            stored = db.kv_get("bot_launch_at")
+            if not stored:
+                stored = str(clock())
+                db.kv_set("bot_launch_at", stored)
+            settings.bot_launch_at = float(stored)
         self._locks: dict[int, asyncio.Lock] = {}
         self._generation: dict[int, int] = {}
         self._tasks: set[asyncio.Task] = set()
@@ -79,50 +87,95 @@ class Service:
                 await self._on_echo(event)
             elif event.kind == "deleted":
                 await self._on_deleted(event)
+            elif event.kind == "referral":
+                self._mark_from_ad(self.db.get_or_create_conversation(event.client_id))
         return handled
+
+    def _mark_from_ad(self, conv: Conversation) -> None:
+        # Реклама студии ведёт только на тату-запросы. Личный контакт остаётся личным.
+        if conv.scope == "unknown" and not self.db.is_personal_contact(conv.ig_user_id, conv.username):
+            self.db.update_conversation(conv.id, scope="tattoo")
+
+    def _count(self, key: str) -> None:
+        day = _utc(self.clock()).strftime("%Y-%m-%d")
+        self.db.kv_set(f"{key}:{day}", str(int(self.db.kv_get(f"{key}:{day}", "0") or 0) + 1))
+
+    def _leave_to_artist(self, conversation_id: int, scope: str) -> None:
+        """Диалог не для бота: забываем его содержимое, бот больше в нём не участвует."""
+        self.db.forget_conversation_content(conversation_id)
+        self.db.update_conversation(conversation_id, scope=scope)
+        self._count("skipped")
 
     async def _on_client_message(self, ev: IncomingEvent) -> None:
         conv = self.db.get_or_create_conversation(ev.client_id)
+        if ev.from_ad:
+            self._mark_from_ad(conv)
+            conv = self.db.get_conversation(conv.id) or conv
+        if self.settings.topic_filter and conv.scope in {"personal", "ignored"}:
+            return  # личная переписка мастера: ничего не храним и не отвечаем
         ts = ev.timestamp or self.clock()
-        row_id = self.db.add_message(conv.id, "client", ev.text, mid=ev.mid, attachments=ev.attachments, created_at=ts)
+        self.db.add_message(conv.id, "client", ev.text, mid=ev.mid, attachments=ev.attachments, created_at=ts)
         fields: dict[str, Any] = {"last_client_msg_at": ts, "last_activity_at": ts}
         pause = self.settings.disclosure_pause_hours * 3600
         if conv.llm_history and conv.last_activity_at and ts - conv.last_activity_at > pause:
             fields["needs_disclosure"] = True
         self.db.update_conversation(conv.id, **fields)
-        if not conv.username:
-            self._spawn(self._fetch_username(conv.id, ev.client_id))
-        if self.images and any(a.get("type") == "image" and a.get("url") for a in ev.attachments):
-            # Пока картинка загружается, ход не начинается: задача загрузки сама запланирует ответ.
-            self._uploading[conv.id] = self._uploading.get(conv.id, 0) + 1
-            self._spawn(self._ingest_images(conv.id, row_id, ev.attachments))
-        else:
-            self._schedule(conv.id)
+        self._schedule(conv.id)
 
-    async def _ingest_images(self, conversation_id: int, row_id: int, attachments: list[dict]) -> None:
-        assert self.images
-        try:
+    async def _ingest_images(self, rows) -> None:
+        """Картинки загружаются в Files API только в диалогах про тату и только перед ходом модели."""
+        if not self.images:
+            return
+        for r in rows:
+            attachments = json.loads(r["attachments"] or "[]")
+            changed = False
             for i, a in enumerate(attachments):
-                if a.get("type") != "image" or not a.get("url"):
+                if a.get("type") != "image" or not a.get("url") or "file_id" in a or a.get("failed"):
                     continue
                 try:
-                    file_id = await self.images.ingest(a["url"], f"ref_{conversation_id}_{row_id}_{i}")
+                    file_id = await self.images.ingest(a["url"], f"ref_{r['conversation_id']}_{r['id']}_{i}")
                 except Exception:
                     log.exception("image ingest failed")
                     file_id = None
                 if file_id:
                     a["file_id"] = file_id
-            self.db.execute(
-                "UPDATE messages SET attachments = ? WHERE id = ?", (json.dumps(attachments, ensure_ascii=False), row_id)
-            )
-        finally:
-            self._uploading[conversation_id] -= 1
-            self._schedule(conversation_id)
+                else:
+                    a["failed"] = True
+                changed = True
+            if changed:
+                self.db.execute(
+                    "UPDATE messages SET attachments = ? WHERE id = ?", (json.dumps(attachments, ensure_ascii=False), r["id"])
+                )
 
-    async def _fetch_username(self, conversation_id: int, ig_user_id: str) -> None:
-        username = await self.ig.get_username(ig_user_id)
-        if username:
-            self.db.update_conversation(conversation_id, username=username)
+    async def _decide_scope(self, conv: Conversation, rows) -> str:
+        """Можно ли боту вести этот диалог. Порядок: личные контакты, старая переписка, тема сообщений."""
+        username = conv.username
+        if not username:
+            username = await self.ig.get_username(conv.ig_user_id)
+            if username:
+                self.db.update_conversation(conv.id, username=username)
+        if self.db.is_personal_contact(conv.ig_user_id, username):
+            return "personal"
+        if self.settings.skip_existing_contacts:
+            # Сообщения, пришедшие сейчас, тоже лежат в Instagram; старыми считаем те, что раньше запуска бота.
+            existed = await self.ig.had_messages_before(conv.ig_user_id, self.settings.bot_launch_at)
+            if existed:
+                return "personal"
+        if not self.classifier:
+            return "tattoo"
+        all_rows = self.db.all(
+            "SELECT * FROM messages WHERE conversation_id = ? AND author = 'client' ORDER BY created_at, id", (conv.id,)
+        )
+        verdict = await self.classifier.classify([self._row_text(r) for r in all_rows][-10:])
+        if verdict.cost_usd:
+            self.db.record_usage(conv.id, verdict.model or self.classifier.model, verdict.usage.get("input", 0),
+                                 verdict.usage.get("output", 0), verdict.usage.get("cache_write", 0),
+                                 verdict.usage.get("cache_read", 0), verdict.cost_usd)
+        if verdict.topic == "tattoo":
+            return "tattoo"
+        if verdict.topic == "not_tattoo" or len(all_rows) >= self.settings.classifier_max_unclear:
+            return "ignored"
+        return "unknown"
 
     def _schedule(self, conversation_id: int) -> None:
         """Клиенты часто пишут несколькими сообщениями подряд: ждём паузу и отвечаем на всё сразу."""
@@ -142,7 +195,14 @@ class Service:
             await self.alert(f"Необработанная ошибка в диалоге #{conversation_id}: {esc(e)}")
 
     async def _on_echo(self, ev: IncomingEvent) -> None:
-        conv = self.db.get_or_create_conversation(ev.client_id)
+        conv = self.db.find_conversation(ev.client_id)
+        if conv is None:
+            if self.settings.topic_filter:
+                # Мастер написала первой: это её переписка. Запоминаем только сам факт, без текста.
+                conv = self.db.get_or_create_conversation(ev.client_id)
+                self.db.update_conversation(conv.id, scope="personal")
+                return
+            conv = self.db.get_or_create_conversation(ev.client_id)
         if self.db.one("SELECT id FROM messages WHERE mid = ?", (ev.mid,)):
             return  # наше собственное сообщение, mid уже известен
         # Эхо может прийти раньше, чем API вернул mid: сверяем по тексту недавних исходящих.
@@ -154,6 +214,12 @@ class Service:
         if own:
             self.db.execute("UPDATE messages SET mid = ? WHERE id = ?", (ev.mid, own["id"]))
             return
+
+        if self.settings.topic_filter and conv.scope != "tattoo":
+            if conv.scope == "unknown":
+                # Мастер ответила сама, пока бот решал: диалог её, бот в него не вмешивается.
+                self._leave_to_artist(conv.id, "ignored")
+            return  # содержимое личной переписки не сохраняем и в Telegram не пересылаем
 
         # Сообщение отправлено не нашим приложением: менеджер из Instagram или Business Suite.
         ts = ev.timestamp or self.clock()
@@ -217,11 +283,20 @@ class Service:
             conv = self.db.get_conversation(conversation_id)
             if conv is None:
                 return
-            if self._uploading.get(conversation_id):
-                return  # ответ запланирует загрузка картинки, когда закончит
             rows = self.db.unprocessed_client_messages(conversation_id)
             if not rows:
                 return
+            if self.settings.topic_filter and conv.scope != "tattoo":
+                if conv.scope in {"personal", "ignored"}:
+                    return
+                scope = await self._decide_scope(conv, rows)
+                if scope in {"personal", "ignored"}:
+                    self._leave_to_artist(conversation_id, scope)
+                    return
+                if scope == "unknown":
+                    return  # ждём следующих сообщений, пока не станет ясно
+                self.db.update_conversation(conversation_id, scope="tattoo")
+                conv = self.db.get_conversation(conversation_id) or conv
             ids = [r["id"] for r in rows]
             texts = [r["text"] for r in rows if r["text"]]
             lang = language.detect_language(" ".join(texts))
@@ -240,6 +315,8 @@ class Service:
                 await self._handoff_on_request(conv, rows, lang)
                 return
 
+            await self._ingest_images(rows)
+            rows = self.db.unprocessed_client_messages(conversation_id)
             user_content = self._build_user_turn(conv, rows)
             escalated: dict[str, bool] = {"done": False}
 
@@ -510,6 +587,10 @@ class Service:
     async def _on_tg_message(self, message: dict[str, Any]) -> None:
         if not self._from_our_chat(message.get("chat")):
             return
+        command = (message.get("text") or "").strip()
+        if command.startswith(("/personal", "/bot")):
+            await self._on_command(command)
+            return
         reply_to = message.get("reply_to_message") or {}
         pending = self.db.one(
             "SELECT draft_id FROM tg_pending_edits WHERE tg_prompt_message_id = ?", (reply_to.get("message_id"),)
@@ -529,6 +610,29 @@ class Service:
             self.db.add_note(cid, f"The manager edited your previous reply before sending. The client actually received: «{text}»")
         await self._safe(self.tg.edit_markup(draft["tg_message_id"], None))
         await self._tg_send("✅ Исправленный ответ отправлен" if ok else "❌ Не отправлено, см. алерт")
+
+    async def _on_command(self, command: str) -> None:
+        """/personal @username: бот никогда не трогает этот контакт.
+        /bot @username: отдать боту диалог, который фильтр оставил мастеру (ответит на следующее сообщение)."""
+        name, _, arg = command.partition(" ")
+        username = arg.strip().lstrip("@").lower()
+        name = name.split("@")[0]  # /bot@MyBot в группах
+        if not username:
+            await self._tg_send("Укажите ник: /personal @username или /bot @username")
+            return
+        conv_row = self.db.one("SELECT id FROM conversations WHERE LOWER(username) = ?", (username,))
+        if name == "/personal":
+            self.db.add_personal_contact(f"user:{username}")
+            if conv_row:
+                self._leave_to_artist(conv_row["id"], "personal")
+            await self._tg_send(f"🔒 @{esc(username)} в личных контактах, бот не будет отвечать и хранить переписку.")
+        elif name == "/bot":
+            self.db.execute("DELETE FROM personal_contacts WHERE key = ?", (f"user:{username}",))
+            if not conv_row:
+                await self._tg_send(f"Диалог с @{esc(username)} не найден. Бот увидит его, когда клиент напишет.")
+                return
+            self.db.update_conversation(conv_row["id"], scope="tattoo", status="bot", needs_disclosure=True)
+            await self._tg_send(f"🤖 Диалог с @{esc(username)} отдан боту, он ответит на следующее сообщение клиента.")
 
     # ------------------------------------------------------------------ расход и алерты
     async def _record_usage(self, conversation_id: int, result: AgentResult) -> None:
@@ -593,6 +697,7 @@ class Service:
             f"Диалогов: {dialogs}\n"
             f"Сообщений: клиентов {counts.get('client', 0)}, бота {counts.get('bot', 0)}, менеджера {counts.get('manager', 0)}\n"
             f"Эскалаций: {self.db.kv_get(f'escalations:{day}', '0')}, заявок на запись: {bookings}\n"
+            f"Диалогов не про тату оставлено мастеру: {self.db.kv_get(f'skipped:{day}', '0')}\n"
             f"Расход сегодня: ${spend_day:.2f}\n"
             f"Расход за месяц: ${spend_month:.2f}{pct}"
         )

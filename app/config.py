@@ -39,6 +39,13 @@ class Settings:
     # Поведение
     approval_mode: bool = True
     attach_images: bool = True  # показывать модели фото-референсы клиента
+
+    # Бот отвечает только в диалогах про тату (см. README, «Какие диалоги ведёт бот»)
+    topic_filter: bool = True
+    skip_existing_contacts: bool = True  # не трогать тех, с кем мастер переписывался до запуска бота
+    classifier_model: str = "claude-haiku-5-5"
+    classifier_max_unclear: int = 3  # после стольких неясных сообщений диалог оставляется мастеру
+    bot_launch_at: float = 0.0  # 0: запоминается при первом запуске
     debounce_seconds: float = 4.0
     disclosure_pause_hours: int = 24
     reply_window_hours: int = 24
@@ -71,6 +78,13 @@ class Settings:
         s.telegram_webhook_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
         s.approval_mode = _bool("APPROVAL_MODE", s.approval_mode)
         s.attach_images = _bool("ATTACH_IMAGES", s.attach_images)
+        s.topic_filter = _bool("TOPIC_FILTER", s.topic_filter)
+        s.skip_existing_contacts = _bool("SKIP_EXISTING_CONTACTS", s.skip_existing_contacts)
+        s.classifier_model = os.getenv("CLASSIFIER_MODEL", s.classifier_model)
+        launch = os.getenv("BOT_LAUNCH_DATE")  # например 2026-12-01
+        if launch:
+            from datetime import datetime, timezone
+            s.bot_launch_at = datetime.fromisoformat(launch).replace(tzinfo=timezone.utc).timestamp()
         s.debounce_seconds = float(os.getenv("DEBOUNCE_SECONDS", s.debounce_seconds))
         s.retention_days = int(os.getenv("RETENTION_DAYS", s.retention_days))
         s.monthly_budget_usd = float(os.getenv("MONTHLY_BUDGET_USD", s.monthly_budget_usd))
