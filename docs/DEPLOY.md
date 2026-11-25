@@ -1,6 +1,63 @@
 # Развёртывание и подключение
 
-Порядок: Railway → Telegram → тестовый чат → Meta. Секреты вводятся только в Railway (Variables), не в чат и не в код.
+Для тестов бот можно запустить на своём компьютере (раздел 0), для настоящих клиентов нужен хостинг (разделы 1–4).
+Секреты вводятся только в `.env` на своём компьютере или в Variables на Railway, никогда в чат и не в код.
+
+## 0. Запуск на своём компьютере
+
+Нужны Python 3.11+ (https://www.python.org/downloads/) и git.
+
+```bash
+git clone https://github.com/ideaadsstudio-code/agent_gubska.git
+```
+
+```bash
+cd agent_gubska
+```
+
+```bash
+git checkout claude/bold-sagan-5oza0q
+```
+
+```bash
+python -m venv .venv
+```
+
+Активировать окружение: на macOS и Linux `source .venv/bin/activate`, на Windows `.venv\Scripts\activate`.
+
+```bash
+pip install -r requirements.txt
+```
+
+Скопируйте `.env.example` в `.env` и заполните минимум:
+`ANTHROPIC_API_KEY` (ключ из https://platform.claude.com), `PLAYGROUND_TOKEN` (любой пароль), `STUDIO_NAME`.
+Файл `.env` не попадает в git.
+
+```bash
+uvicorn app.main:create_app --factory --port 8000
+```
+
+Тестовый чат: http://localhost:8000/playground?token=<PLAYGROUND_TOKEN>. Остановить сервер: Ctrl+C.
+
+### Telegram и Instagram локально: туннель
+
+Telegram и Meta должны достучаться до компьютера из интернета. Для этого нужен туннель с публичным HTTPS-адресом.
+
+1. Зарегистрируйтесь на https://ngrok.com, установите ngrok и возьмите бесплатный постоянный домен
+   (Dashboard → Domains).
+2. Запустите в отдельном окне терминала, сервер при этом должен работать:
+
+```bash
+ngrok http 8000 --url=https://<ваш-домен>.ngrok-free.app
+```
+
+3. В `.env` добавьте `PUBLIC_URL=https://<ваш-домен>.ngrok-free.app`, а также переменные Telegram из раздела 2
+   и Instagram из раздела 4. Перезапустите сервер: webhook поставятся сами.
+4. В Meta используйте этот адрес вместо адреса Railway.
+
+Бот работает, только пока включены компьютер, сервер и ngrok. Для настоящих клиентов переходите на Railway (раздел 1):
+код менять не нужно, переменные из `.env` переносятся в Variables.
+
 
 ## 1. Railway (около 30 минут)
 

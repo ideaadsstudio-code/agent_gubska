@@ -9,6 +9,27 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
+def load_dotenv(path: Path = BASE_DIR / ".env") -> None:
+    """Для запуска на своём компьютере: KEY=VALUE из .env в папке проекта.
+    Переменные, уже заданные в окружении (например, на хостинге), не перезаписываются.
+    Пустые значения пропускаются. Комментарий после значения отделяется пробелом и #."""
+    if not path.is_file():
+        return
+    for raw in path.read_text(encoding="utf-8").splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip().removeprefix("export ").strip()
+        value = value.strip()
+        if value[:1] in {'"', "'"} and value.count(value[0]) >= 2:
+            value = value[1 : value.index(value[0], 1)]
+        else:
+            value = value.split(" #", 1)[0].split("\t#", 1)[0].strip()
+        if key and value and key not in os.environ:
+            os.environ[key] = value
+
+
 def _bool(name: str, default: bool) -> bool:
     value = os.getenv(name)
     if value is None:
@@ -66,6 +87,7 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        load_dotenv()
         s = cls()
         s.claude_model = os.getenv("CLAUDE_MODEL", s.claude_model)
         s.claude_effort = os.getenv("CLAUDE_EFFORT", s.claude_effort)
