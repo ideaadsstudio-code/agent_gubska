@@ -1,0 +1,87 @@
+"""HTTP-слой и проверка, что настоящий SDK принимает наш запрос."""
+
+from __future__ import annotations
+
+import json
+
+import anthropic
+import httpx2 as httpx
+from fastapi.testclient import TestClient
+
+from app.agent import Agent
+from app.main import create_app
+from conftest import dumps, sign
+
+
+def make_client(env) -> TestClient:
+    return TestClient(create_app(env.settings, env.service, run_scheduler=False))
+
+
+def test_webhook_verification(env):
+    with make_client(env) as c:
+        ok = c.get("/webhooks/instagram", params={"hub.mode": "subscribe", "hub.verify_token": "verify-me", "hub.challenge": "42"})
+        assert ok.status_code == 200 and ok.text == "42"
+        bad = c.get("/webhooks/instagram", params={"hub.mode": "subscribe", "hub.verify_token": "nope", "hub.challenge": "42"})
+        assert bad.status_code == 403
+
+
+def test_bad_signature_rejected(env):
+    body = dumps(env.payload("Hi"))
+    with make_client(env) as c:
+        r = c.post("/webhooks/instagram", content=body, headers={"X-Hub-Signature-256": sign(body, "wrong")})
+        assert r.status_code == 403
+        r = c.post("/webhooks/instagram", content=body)
+        assert r.status_code == 403
+    assert env.claude.calls == []
+
+
+def test_signed_webhook_end_to_end(env):
+    from conftest import msg, text
+
+    env.claude.queue(msg(text("We do fine line!")))
+    body = dumps(env.payload("Do you do fine line?"))
+    with make_client(env) as c:
+        r = c.post("/webhooks/instagram", content=body, headers={"X-Hub-Signature-256": sign(body)})
+        assert r.status_code == 200
+    assert env.sent_texts()[0].endswith("We do fine line!")
+
+
+def test_telegram_webhook_requires_secret(env):
+    with make_client(env) as c:
+        assert c.post("/webhooks/telegram", json={}).status_code == 403
+        r = c.post("/webhooks/telegram", json={}, headers={"X-Telegram-Bot-Api-Secret-Token": "tg-secret"})
+        assert r.status_code == 200
+
+
+def test_privacy_page(env):
+    with make_client(env) as c:
+        r = c.get("/privacy")
+        assert r.status_code == 200
+        assert "Privacy Policy" in r.text and "90 days" in r.text and "train" in r.text
+
+
+async def test_real_sdk_accepts_request(settings):
+    """Запрос проходит через настоящий anthropic SDK до HTTP; проверяем тело и заголовки."""
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["body"] = json.loads(request.content)
+        seen["beta"] = request.headers.get("anthropic-beta", "")
+        return httpx.Response(200, json={
+            "id": "msg_1", "type": "message", "role": "assistant", "model": "claude-opus-5-5",
+            "content": [{"type": "thinking", "thinking": "", "signature": "s"}, {"type": "text", "text": "Hi!"}],
+            "stop_reason": "end_turn", "stop_sequence": None,
+            "usage": {"input_tokens": 10, "output_tokens": 3, "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0},
+        })
+
+    client = anthropic.AsyncAnthropic(
+        api_key="test", http_client=anthropic.DefaultAsyncHttpxClient(transport=httpx.MockTransport(handler))
+    )
+    agent = Agent(settings, client, "SYSTEM")
+    result = await agent.respond([], [{"type": "text", "text": "Hello"}], execute_tool=None)  # type: ignore[arg-type]
+    assert result.reply_text == "Hi!"
+    assert seen["body"]["fallbacks"] == "default"
+    assert seen["body"]["thinking"]["block_binding"] == {"prefix_mismatch_behavior": "drop_block"}
+    assert "server-side-fallback-2026-07-01" in seen["beta"]
+    assert "thinking-binding-controls-2026-08-01" in seen["beta"]
+    assert result.new_messages[-1]["content"][0] == {"type": "thinking", "thinking": "", "signature": "s"}

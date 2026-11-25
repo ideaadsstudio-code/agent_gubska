@@ -1,0 +1,4 @@
+anthropic>=2.14,<3
+fastapi>=0.165
+uvicorn>=0.54
+httpx2>=2.13
