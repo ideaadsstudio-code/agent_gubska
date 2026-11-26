@@ -165,7 +165,7 @@ async def test_register_webhooks(env, settings):
     async def set_webhook(url, secret):
         calls.append(("tg", url, secret))
 
-    async def subscribe_app(fields="messages,messaging_referral"):
+    async def subscribe_app(fields=None):
         calls.append(("ig", fields))
 
     settings.public_url = "https://bot.example"
@@ -175,7 +175,7 @@ async def test_register_webhooks(env, settings):
     env.ig.subscribe_app = subscribe_app
     await env.service.register_webhooks()
     assert ("tg", "https://bot.example/webhooks/telegram", "tg-secret") in calls
-    assert ("ig", "messages,messaging_referral") in calls
+    assert ("ig", None) in calls  # поля по умолчанию для режима выбирает клиент
 
 
 async def test_refresh_error_does_not_leak_token():
@@ -190,3 +190,42 @@ async def test_refresh_error_does_not_leak_token():
         raise AssertionError("expected error")
     except RuntimeError as e:
         assert "SECRET-TOKEN-123" not in str(e) and "Invalid OAuth" in str(e)
+
+
+async def test_facebook_mode_uses_page_endpoints():
+    from app.instagram import InstagramClient
+
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path.endswith("/me/messages"):
+            return httpx.Response(200, json={"recipient_id": "1789", "message_id": "mid.1"})
+        if request.url.path.endswith("/me/subscribed_apps"):
+            return httpx.Response(200, json={"success": True})
+        return httpx.Response(200, json={"username": "kate"})
+
+    ig = InstagramClient(lambda: "PAGE-TOKEN", http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                         mode="facebook")
+    assert await ig.send_text("1789", "Hi") == "mid.1"
+    await ig.subscribe_app()
+    assert await ig.get_username("1789") == "kate"
+    assert all(r.url.host == "graph.facebook.com" for r in seen)
+    assert json.loads(seen[0].content) == {"recipient": {"id": "1789"}, "message": {"text": "Hi"}}
+    assert seen[0].headers["authorization"] == "Bearer PAGE-TOKEN"
+    assert seen[1].url.params["subscribed_fields"] == "messages"
+
+
+async def test_send_error_shows_meta_reason_without_token():
+    from app.instagram import InstagramClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "(#10) Outside of allowed window", "code": 10}})
+
+    ig = InstagramClient(lambda: "PAGE-TOKEN", http=httpx.AsyncClient(transport=httpx.MockTransport(handler)),
+                         mode="facebook")
+    try:
+        await ig.send_text("1789", "Hi")
+        raise AssertionError("expected error")
+    except RuntimeError as e:
+        assert "Outside of allowed window" in str(e) and "code 10" in str(e) and "PAGE-TOKEN" not in str(e)

@@ -55,6 +55,9 @@ def build_router(settings: Settings, service: Service) -> APIRouter:
     async def start(token: str = ""):
         if not settings.admin_token or not hmac.compare_digest(token, settings.admin_token):
             raise HTTPException(status_code=403)
+        if settings.ig_api_mode == "facebook":
+            return _page("Ссылка не нужна", "<p>Бот подключён через вход Facebook (IG_API_MODE=facebook): "
+                         "токен страницы выдаёт администратор страницы в панели Meta, мастеру ничего делать не нужно.</p>")
         missing = [n for n, v in (("IG_APP_ID", settings.ig_app_id), ("IG_APP_SECRET", settings.ig_app_secret),
                                   ("PUBLIC_URL / домен Railway", settings.public_url)) if not v]
         if missing:

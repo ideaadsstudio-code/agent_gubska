@@ -52,6 +52,9 @@ class Settings:
     ig_access_token: str = ""
     ig_verify_token: str = ""
     graph_api_version: str = "v24.0"
+    # facebook: вход через Facebook, токен страницы (для новых приложений Meta); instagram: вход через Instagram
+    ig_api_mode: str = "facebook"
+    ig_subscribe_fields: str = ""  # пусто: по умолчанию для режима
 
     # Telegram
     telegram_bot_token: str = ""
@@ -100,6 +103,8 @@ class Settings:
         s.ig_access_token = os.getenv("IG_ACCESS_TOKEN", "")
         s.ig_verify_token = os.getenv("IG_VERIFY_TOKEN", "")
         s.graph_api_version = os.getenv("GRAPH_API_VERSION", s.graph_api_version)
+        s.ig_api_mode = os.getenv("IG_API_MODE", s.ig_api_mode).strip().lower()
+        s.ig_subscribe_fields = os.getenv("IG_SUBSCRIBE_FIELDS", "")
         s.telegram_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
         s.telegram_chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
         s.telegram_webhook_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")

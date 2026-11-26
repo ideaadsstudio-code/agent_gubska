@@ -14,6 +14,7 @@ from app.main import create_app
 
 def setup(env, settings, fail_exchange: bool = False):
     settings.playground_token = settings.admin_token = "admin123"
+    settings.ig_api_mode = "instagram"
     settings.ig_app_id = "app-id"
     settings.public_url = "https://bot.example"
     seen: list[httpx.Request] = []

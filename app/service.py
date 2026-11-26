@@ -742,6 +742,8 @@ class Service:
         """Продлевает долгий токен Instagram и напоминает, если срок подходит к концу."""
         if not (self.db.kv_get("ig_token") or self.settings.ig_access_token):
             return  # Instagram ещё не подключён
+        if self.settings.ig_api_mode == "facebook":
+            return  # токен страницы Facebook не истекает и не продлевается
         now = self.clock()
         expires_at = float(self.db.kv_get("ig_token_expires_at", "0") or 0)
         last_try = float(self.db.kv_get("ig_token_last_refresh_try", "0") or 0)
@@ -797,7 +799,7 @@ class Service:
                 log.exception("telegram setWebhook failed")
         if self.settings.ig_access_token or self.db.kv_get("ig_token"):
             try:
-                await self.ig.subscribe_app()
+                await self.ig.subscribe_app(self.settings.ig_subscribe_fields or None)
                 log.info("instagram account subscribed to webhooks")
             except Exception as e:
                 log.exception("instagram subscribed_apps failed")

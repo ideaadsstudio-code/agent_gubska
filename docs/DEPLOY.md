@@ -103,36 +103,45 @@ ngrok http 8000 --url=https://<ваш-домен>.ngrok-free.app
 Бот отвечает настоящей моделью с текущей базой знаний, карточки «менеджеру» показываются прямо в чате.
 В Instagram и Telegram ничего не уходит, расход попадает в общую сводку.
 
-## 4. Meta (1–2 дня)
+## 4. Meta: подключение через вход Facebook (1–2 часа)
 
-Перед началом проверьте в Instagram мастера:
-- аккаунт профессиональный (бизнес или автор);
-- Настройки → Сообщения и ответы на истории → Управление сообщениями → **Подключённые инструменты** → включено **«Разрешить доступ к сообщениям»**.
+Новые приложения Meta (с конца октября 2026) не могут подключаться через вход Instagram. Используем
+**API setup with Facebook login**: Instagram мастера привязан к Facebook-странице, бот работает от имени страницы.
+Нужны права администратора этой страницы, мастеру ничего делать не нужно.
 
-Дальше:
-1. https://developers.facebook.com/apps → **Создать приложение** → сценарий «Управление сообщениями и контентом в Instagram».
-2. В разделе **API setup with Instagram login** скопируйте **Instagram app ID** → `IG_APP_ID`
-   и **Instagram app secret** → `IG_APP_SECRET` (в Railway → Variables).
-3. Там же блок **Set up Instagram business login → Business login settings → OAuth redirect URIs**:
-   добавьте `https://<адрес>/auth/instagram/callback` и сохраните.
-4. **Подключение аккаунта мастера по ссылке:** откройте `https://<адрес>/auth/instagram/start?token=<PLAYGROUND_TOKEN>`,
-   скопируйте ссылку и отправьте мастеру. Она открывает её на телефоне и нажимает «Разрешить».
-   Сервер сам сохранит токен (60 дней, продлевается автоматически) и подпишет аккаунт на сообщения,
-   в Telegram придёт «Instagram подключён». Пароль мастера никому не передаётся.
-   Запасной вариант: «Add account» → «Generate token» в панели Meta и токен в `IG_ACCESS_TOKEN`.
-5. **Webhooks:** Callback URL `https://<адрес>/webhooks/instagram`, Verify token — значение `IG_VERIFY_TOKEN`.
-   Подпишитесь на поля `messages` и `messaging_referral`.
-   Подписку самого аккаунта (`subscribed_apps`) сервер делает сам после подключения и при каждом старте.
-6. **Роли → Тестировщики Instagram:** добавьте 1–2 личных аккаунта. Приглашение принимается в Instagram:
-   Настройки → Приложения и сайты → Приглашения тестировщика.
-7. **Настройки приложения → Основное:** иконка, категория, Privacy Policy URL `https://<адрес>/privacy`,
-   User data deletion → Data deletion instructions URL `https://<адрес>/data-deletion`.
-8. Задайте `BOT_LAUNCH_DATE` (сегодняшняя дата, например `2026-12-01`): переписка до этой даты остаётся мастеру.
-9. Переключите приложение в режим **Live**.
+Перед началом:
+- в Instagram мастера: Настройки → Сообщения и ответы на истории → Управление сообщениями →
+  **Подключённые инструменты → «Разрешить доступ к сообщениям»** включено;
+- **ManyChat** (или другой сервис) отключён от страницы и Instagram, либо наше приложение назначено основным в
+  Business Suite → Настройки → **Расширенные настройки сообщений → Маршрутизация переписки** (Conversation routing).
+  Иначе сообщения будут уходить ManyChat, а наш бот их не увидит.
+
+1. Приложение → **Use cases → Instagram API → Customize → API setup with Facebook login**.
+2. **Permissions and features:** добавьте `instagram_basic`, `instagram_manage_messages`, `pages_show_list`,
+   `pages_manage_metadata`, а если страница в бизнес-портфолио, то и `business_management`.
+3. **Generate access tokens:** войдите своим Facebook (администратор страницы), выберите страницу,
+   к которой привязан tattoo.by.gubska, и нажмите **Generate token**.
+   Проверьте токен в https://developers.facebook.com/tools/debug/accesstoken: должно быть **Expires: Never**.
+4. **App settings → Basic → App secret** (секрет самого приложения Facebook).
+5. **Railway → Variables:**
+   ```
+   IG_API_MODE=facebook
+   IG_ACCESS_TOKEN=<токен страницы>
+   IG_APP_SECRET=<App secret из шага 4>
+   BOT_LAUNCH_DATE=<сегодняшняя дата, например 2026-11-26>
+   ```
+   Deploy. В логах должна появиться строка `instagram account subscribed to webhooks`.
+   Если вместо неё алерт «Не удалось подписать аккаунт», пришлите его текст.
+6. **Webhooks** (на той же странице «Configure webhooks» или в продукте Webhooks → объект **Instagram**):
+   Callback URL `https://<адрес>/webhooks/instagram`, Verify token = `IG_VERIFY_TOKEN` → **Verify and save**,
+   подпишитесь на поля `messages` и `messaging_referral`.
+7. **App settings → Basic:** Privacy Policy URL `https://<адрес>/privacy`, Data deletion instructions URL
+   `https://<адрес>/data-deletion`, иконка 1024×1024, категория. Сохранить.
+8. Переключите приложение в **Live**.
 
 ### Проверка, нужны ли App Review и верификация бизнеса
 
-1. Напишите мастеру с **тестового аккаунта** (с ролью) вопрос про тату. Бот должен прислать черновик в Telegram.
+1. Напишите мастеру с **тестового аккаунта**, который раньше ей не писал, вопрос про тату. Бот должен прислать черновик в Telegram.
 2. Напишите с **аккаунта без роли** в приложении, например попросите знакомого.
    - Черновик пришёл: Standard Access хватает, App Review и верификация не нужны.
    - Ничего не пришло: нужен App Review (Advanced Access для `instagram_business_manage_messages`),

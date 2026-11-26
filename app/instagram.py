@@ -126,9 +126,18 @@ def _pieces(text: str, limit: int) -> list[str]:
 
 
 class InstagramClient:
-    def __init__(self, access_token_getter, api_version: str = "v24.0", http: httpx.AsyncClient | None = None):
+    """Два режима подключения:
+    - "facebook": Instagram API через вход Facebook. Токен страницы Facebook, к которой привязан Instagram,
+      запросы на graph.facebook.com, "/me" означает эту страницу. Токен страницы не истекает.
+    - "instagram": Instagram API через вход Instagram (graph.instagram.com). Meta не даёт его новым приложениям.
+    Формат webhook и тела запросов в обоих режимах одинаковый."""
+
+    def __init__(self, access_token_getter, api_version: str = "v24.0", http: httpx.AsyncClient | None = None,
+                 mode: str = "instagram"):
         self._token = access_token_getter
-        self.base = f"https://graph.instagram.com/{api_version}"
+        self.mode = mode
+        host = "graph.facebook.com" if mode == "facebook" else "graph.instagram.com"
+        self.base = f"https://{host}/{api_version}"
         self.http = http or httpx.AsyncClient(timeout=20.0)
 
     async def send_text(self, recipient_id: str, text: str) -> str:
@@ -138,7 +147,7 @@ class InstagramClient:
             headers={"Authorization": f"Bearer {self._token()}"},
             json={"recipient": {"id": recipient_id}, "message": {"text": text}},
         )
-        resp.raise_for_status()
+        self._raise_clean(resp, "Отправка сообщения")
         return str(resp.json().get("message_id", ""))
 
     async def get_username(self, user_id: str) -> str | None:
@@ -184,14 +193,16 @@ class InstagramClient:
             log.warning("could not check conversation history for %s", user_id)
             return None
 
-    async def subscribe_app(self, fields: str = "messages,messaging_referral") -> None:
-        """Подписывает аккаунт мастера на webhook нашего приложения (идемпотентно)."""
+    async def subscribe_app(self, fields: str | None = None) -> None:
+        """Подписывает аккаунт мастера (в режиме facebook: его страницу) на webhook нашего приложения."""
+        if fields is None:
+            fields = "messages" if self.mode == "facebook" else "messages,messaging_referral"
         resp = await self.http.post(
             f"{self.base}/me/subscribed_apps",
             params={"subscribed_fields": fields},
             headers={"Authorization": f"Bearer {self._token()}"},
         )
-        resp.raise_for_status()
+        self._raise_clean(resp, "Подписка на webhook")
 
     # ---- Instagram Business Login: мастер разрешает доступ по ссылке ----
     @staticmethod
@@ -200,7 +211,10 @@ class InstagramClient:
         if resp.is_error:
             try:
                 body = resp.json()
-                detail = body.get("error_message") or (body.get("error") or {}).get("message") or ""
+                err = body.get("error") if isinstance(body.get("error"), dict) else {}
+                detail = body.get("error_message") or err.get("message") or ""
+                if err.get("code"):
+                    detail = f"{detail} (code {err['code']})"
             except ValueError:
                 detail = ""
             raise RuntimeError(f"{what}: HTTP {resp.status_code} {detail}".strip())

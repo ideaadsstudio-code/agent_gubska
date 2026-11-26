@@ -32,7 +32,8 @@ def build_service(settings: Settings) -> Service:
     # ANTHROPIC_API_KEY читается SDK из окружения.
     client = anthropic.AsyncAnthropic(max_retries=2)
     agent = Agent(settings, client, load_system_prompt(settings))
-    ig = InstagramClient(lambda: db.kv_get("ig_token") or settings.ig_access_token, settings.graph_api_version)
+    ig = InstagramClient(lambda: db.kv_get("ig_token") or settings.ig_access_token, settings.graph_api_version,
+                         mode=settings.ig_api_mode)
     tg = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
     images = ImageStore(client, settings.retention_days) if settings.attach_images else None
     classifier = TopicClassifier(client, settings.classifier_model) if settings.topic_filter else None

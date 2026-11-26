@@ -445,6 +445,13 @@ async def test_daily_summary(env):
     assert "Сводка" in summary and "Диалогов: 1" in summary and "$" in summary
 
 
+async def test_page_token_not_refreshed_in_facebook_mode(env, settings):
+    settings.ig_access_token = "page-token"
+    settings.ig_api_mode = "facebook"
+    await env.service.check_token()
+    assert env.tg.sent == [] and env.db.kv_get("ig_token") is None
+
+
 async def test_token_check_skipped_without_instagram(env):
     await env.service.check_token()
     assert env.tg.sent == [] and env.db.kv_get("ig_token") is None
@@ -452,6 +459,7 @@ async def test_token_check_skipped_without_instagram(env):
 
 async def test_token_refresh_stores_new_token(env, settings):
     settings.ig_access_token = "old-token"
+    settings.ig_api_mode = "instagram"
     await env.service.check_token()
     assert env.db.kv_get("ig_token") == "new-token"
     assert float(env.db.kv_get("ig_token_expires_at")) > env.clock() + 50 * 86400
@@ -459,6 +467,7 @@ async def test_token_refresh_stores_new_token(env, settings):
 
 async def test_token_expiry_reminder(env, settings):
     settings.ig_access_token = "old-token"
+    settings.ig_api_mode = "instagram"
     env.ig.refresh_result = RuntimeError("refresh denied")
     env.db.kv_set("ig_token_expires_at", str(env.clock() + 5 * 86400))
     await env.service.check_token()
