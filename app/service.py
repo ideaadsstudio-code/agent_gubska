@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -766,7 +767,11 @@ class Service:
     async def register_webhooks(self) -> None:
         """При старте: webhook Telegram и подписка аккаунта Instagram. Повторный вызов безопасен."""
         url = self.settings.public_url
-        if url and self.settings.telegram_bot_token and self.settings.telegram_webhook_secret:
+        secret = self.settings.telegram_webhook_secret
+        if secret and not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", secret):
+            log.error("TELEGRAM_WEBHOOK_SECRET: допустимы только латинские буквы, цифры, _ и -. "
+                      "Telegram не примет webhook, бот не будет получать сообщения из группы.")
+        if url and self.settings.telegram_bot_token and secret:
             try:
                 await self.tg.set_webhook(f"{url}/webhooks/telegram", self.settings.telegram_webhook_secret)
                 log.info("telegram webhook set")

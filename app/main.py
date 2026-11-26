@@ -65,6 +65,9 @@ def create_app(settings: Settings | None = None, service: Service | None = None,
     app.state.service = service
     app.include_router(build_playground(settings, service.agent, service.classifier, service.db))
 
+    if settings.playground_token and not settings.playground_token.isalnum():
+        log.warning("PLAYGROUND_TOKEN лучше задавать только из букв и цифр: спецсимволы ломаются в адресе страницы.")
+
     @app.get("/health")
     async def health():
         return {"ok": True, "model": settings.claude_model, "approval_mode": settings.approval_mode}
