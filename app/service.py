@@ -300,7 +300,7 @@ class Service:
                 conv = self.db.get_conversation(conversation_id) or conv
             ids = [r["id"] for r in rows]
             texts = [r["text"] for r in rows if r["text"]]
-            lang = language.detect_language(" ".join(texts))
+            lang = self._language(conversation_id, texts)
 
             if conv.status == "manager":
                 # Бот на паузе. Модель узнает об этих сообщениях, если диалог вернут боту.
@@ -360,11 +360,27 @@ class Service:
             text = f"{text} [attachment: {kinds}]".strip()
         return text
 
+    def _language(self, conversation_id: int, texts: list[str]) -> str:
+        """Язык для текстов, которые добавляет код. Короткое «human» или «ok» латиницей не меняет язык диалога."""
+        current = " ".join(texts)
+        lang = language.detect_language(current)
+        if lang == "en" and len(current) < 20:
+            recent = self.db.all(
+                "SELECT text FROM messages WHERE conversation_id = ? AND author = 'client' AND text != '' "
+                "ORDER BY created_at DESC, id DESC LIMIT 6", (conversation_id,)
+            )
+            lang = language.detect_language(" ".join(r["text"] for r in recent)) if recent else lang
+        return lang
+
     def _build_user_turn(self, conv: Conversation, rows) -> list[dict[str, Any]]:
         lines = []
         if conv.pending_notes:
             lines.append("[Notes from the system since your last reply]")
             lines.extend(f"- {n}" for n in conv.pending_notes)
+            lines.append("")
+        if conv.needs_disclosure:
+            lines.append("[Your reply will be sent right after the studio's standard greeting with the AI assistant "
+                         "notice. Do not greet the client or introduce yourself: start directly with the answer.]")
             lines.append("")
         received = _utc(rows[-1]["created_at"]).strftime("%A %Y-%m-%d %H:%M UTC")
         lines.append(f"[Client messages, received {received}]")

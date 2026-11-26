@@ -465,3 +465,27 @@ async def test_token_expiry_reminder(env, settings):
     texts = env.tg.texts()
     assert any("Не удалось обновить токен" in t for t in texts)
     assert any("истекает через 5" in t for t in texts)
+
+
+async def test_handoff_ack_keeps_conversation_language(env):
+    env.claude.queue(msg(text("Расскажите про идею")))
+    await env.client_says("Хочу записаться")
+    await env.client_says("Human")
+    assert env.sent_texts()[-1] == HANDOFF_ACK["ru"]
+
+
+async def test_switch_to_english_is_respected(env):
+    env.claude.queue(msg(text("Расскажите про идею")), msg(text("Sure!")))
+    await env.client_says("Хочу записаться")
+    await env.client_says("Can we continue in English please, I don't read Russian well")
+    assert len(env.claude.calls) == 2  # не ушло в менеджера и не сломалось
+
+
+async def test_model_told_not_to_greet_when_disclosure_added(env):
+    env.claude.queue(msg(text("Hello!")), msg(text("Sure")))
+    await env.client_says("Hi")
+    first = env.claude.calls[0]["messages"][-1]["content"][0]["text"]
+    assert "Do not greet the client" in first
+    await env.client_says("I want a rose")
+    second = env.claude.calls[1]["messages"][-1]["content"][0]["text"]
+    assert "Do not greet the client" not in second
