@@ -196,7 +196,8 @@ class InstagramClient:
     async def subscribe_app(self, fields: str | None = None) -> None:
         """Подписывает аккаунт мастера (в режиме facebook: его страницу) на webhook нашего приложения."""
         if fields is None:
-            fields = "messages" if self.mode == "facebook" else "messages,messaging_referral"
+            # Подписка заменяет весь список полей страницы, поэтому перечисляем все нужные.
+            fields = "messages,messaging_postbacks,messaging_referral"
         resp = await self.http.post(
             f"{self.base}/me/subscribed_apps",
             params={"subscribed_fields": fields},
