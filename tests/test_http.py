@@ -213,7 +213,7 @@ async def test_facebook_mode_uses_page_endpoints():
     assert all(r.url.host == "graph.facebook.com" for r in seen)
     assert json.loads(seen[0].content) == {"recipient": {"id": "1789"}, "message": {"text": "Hi"}}
     assert seen[0].headers["authorization"] == "Bearer PAGE-TOKEN"
-    assert seen[1].url.params["subscribed_fields"] == "messages,messaging_postbacks,messaging_referral"
+    assert seen[1].url.params["subscribed_fields"] == "messages,messaging_postbacks,messaging_referrals"
 
 
 async def test_send_error_shows_meta_reason_without_token():
