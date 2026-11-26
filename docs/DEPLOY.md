@@ -111,17 +111,24 @@ ngrok http 8000 --url=https://<ваш-домен>.ngrok-free.app
 
 Дальше:
 1. https://developers.facebook.com/apps → **Создать приложение** → сценарий «Управление сообщениями и контентом в Instagram».
-2. В разделе API с входом через Instagram: **добавьте аккаунт мастера** и сгенерируйте токен. Токен → `IG_ACCESS_TOKEN`.
-   **App Secret** из настроек Instagram в приложении → `IG_APP_SECRET`.
-3. **Webhooks:** Callback URL `https://<адрес>/webhooks/instagram`, Verify token — значение `IG_VERIFY_TOKEN`.
+2. В разделе **API setup with Instagram login** скопируйте **Instagram app ID** → `IG_APP_ID`
+   и **Instagram app secret** → `IG_APP_SECRET` (в Railway → Variables).
+3. Там же блок **Set up Instagram business login → Business login settings → OAuth redirect URIs**:
+   добавьте `https://<адрес>/auth/instagram/callback` и сохраните.
+4. **Подключение аккаунта мастера по ссылке:** откройте `https://<адрес>/auth/instagram/start?token=<PLAYGROUND_TOKEN>`,
+   скопируйте ссылку и отправьте мастеру. Она открывает её на телефоне и нажимает «Разрешить».
+   Сервер сам сохранит токен (60 дней, продлевается автоматически) и подпишет аккаунт на сообщения,
+   в Telegram придёт «Instagram подключён». Пароль мастера никому не передаётся.
+   Запасной вариант: «Add account» → «Generate token» в панели Meta и токен в `IG_ACCESS_TOKEN`.
+5. **Webhooks:** Callback URL `https://<адрес>/webhooks/instagram`, Verify token — значение `IG_VERIFY_TOKEN`.
    Подпишитесь на поля `messages` и `messaging_referral`.
-   Подписку самого аккаунта (`subscribed_apps`) сервер делает при старте, если задан `IG_ACCESS_TOKEN`.
-4. **Роли → Тестировщики Instagram:** добавьте 1–2 личных аккаунта. Приглашение принимается в Instagram:
+   Подписку самого аккаунта (`subscribed_apps`) сервер делает сам после подключения и при каждом старте.
+6. **Роли → Тестировщики Instagram:** добавьте 1–2 личных аккаунта. Приглашение принимается в Instagram:
    Настройки → Приложения и сайты → Приглашения тестировщика.
-5. **Настройки приложения → Основное:** иконка, категория, Privacy Policy URL `https://<адрес>/privacy`,
+7. **Настройки приложения → Основное:** иконка, категория, Privacy Policy URL `https://<адрес>/privacy`,
    User data deletion → Data deletion instructions URL `https://<адрес>/data-deletion`.
-6. Задайте `BOT_LAUNCH_DATE` (сегодняшняя дата, например `2026-12-01`): переписка до этой даты остаётся мастеру.
-7. Переключите приложение в режим **Live**.
+8. Задайте `BOT_LAUNCH_DATE` (сегодняшняя дата, например `2026-12-01`): переписка до этой даты остаётся мастеру.
+9. Переключите приложение в режим **Live**.
 
 ### Проверка, нужны ли App Review и верификация бизнеса
 

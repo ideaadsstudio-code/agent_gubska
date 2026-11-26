@@ -193,6 +193,46 @@ class InstagramClient:
         )
         resp.raise_for_status()
 
+    # ---- Instagram Business Login: мастер разрешает доступ по ссылке ----
+    @staticmethod
+    def _raise_clean(resp: httpx.Response, what: str) -> None:
+        """Ошибка без адреса запроса: в нём бывают токены и секреты."""
+        if resp.is_error:
+            try:
+                body = resp.json()
+                detail = body.get("error_message") or (body.get("error") or {}).get("message") or ""
+            except ValueError:
+                detail = ""
+            raise RuntimeError(f"{what}: HTTP {resp.status_code} {detail}".strip())
+
+    async def exchange_code(self, app_id: str, app_secret: str, redirect_uri: str, code: str) -> str:
+        """Код из ссылки → короткий токен (1 час)."""
+        resp = await self.http.post(
+            "https://api.instagram.com/oauth/access_token",
+            data={"client_id": app_id, "client_secret": app_secret, "grant_type": "authorization_code",
+                  "redirect_uri": redirect_uri, "code": code},
+        )
+        self._raise_clean(resp, "Обмен кода на токен")
+        body = resp.json()
+        data = body["data"][0] if isinstance(body.get("data"), list) and body["data"] else body
+        return data["access_token"]
+
+    async def long_lived_token(self, app_secret: str, short_token: str) -> tuple[str, int]:
+        """Короткий токен → долгий (60 дней)."""
+        resp = await self.http.get(
+            "https://graph.instagram.com/access_token",
+            params={"grant_type": "ig_exchange_token", "client_secret": app_secret, "access_token": short_token},
+        )
+        self._raise_clean(resp, "Получение долгого токена")
+        data = resp.json()
+        return data["access_token"], int(data.get("expires_in", 0))
+
+    async def whoami(self, token: str) -> str:
+        resp = await self.http.get(f"{self.base}/me", params={"fields": "user_id,username"},
+                                   headers={"Authorization": f"Bearer {token}"})
+        self._raise_clean(resp, "Профиль")
+        return resp.json().get("username", "")
+
     async def refresh_token(self) -> tuple[str, int]:
         """Обновляет долгий токен. Возвращает (новый токен, срок жизни в секундах)."""
         resp = await self.http.get(

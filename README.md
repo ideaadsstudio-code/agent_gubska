@@ -21,6 +21,7 @@ uvicorn app.main:create_app --factory --port 8000
 | `GET /privacy` | публичная политика конфиденциальности для App Review |
 | `GET /data-deletion` | инструкция по удалению данных (требование Meta) |
 | `GET /playground?token=…` | тестовый чат с ботом без Instagram |
+| `GET /auth/instagram/start?token=…` | ссылка, по которой мастер подключает свой Instagram |
 | `GET /health` | проверка живости |
 
 Webhook Telegram и подписку аккаунта Instagram сервер ставит сам при старте.
@@ -44,7 +45,7 @@ app/
 prompts/system.md          системный промпт ({{KNOWLEDGE_BASE}} подставляется при старте)
 knowledge/knowledge_base.md база знаний, заполняется владельцем
 scripts/analyze_export.py  анализ выгрузки переписки Instagram
-tests/                     92 сценария с фейками Claude, Instagram и Telegram
+tests/                     104 сценария с фейками Claude, Instagram и Telegram
 ```
 
 ## Как это работает

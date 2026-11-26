@@ -48,6 +48,7 @@ class Settings:
 
     # Instagram
     ig_app_secret: str = ""
+    ig_app_id: str = ""  # Instagram app ID: нужен для ссылки авторизации мастера
     ig_access_token: str = ""
     ig_verify_token: str = ""
     graph_api_version: str = "v24.0"
@@ -83,6 +84,7 @@ class Settings:
     studio_name: str = "the studio"
     public_url: str = ""  # https://<домен>; на Railway берётся из RAILWAY_PUBLIC_DOMAIN
     playground_token: str = ""  # пароль тестового чата /playground; пусто: страница выключена
+    admin_token: str = ""  # пароль служебных страниц; пусто: используется PLAYGROUND_TOKEN
     privacy_contact: str = ""
 
     @classmethod
@@ -94,6 +96,7 @@ class Settings:
         s.claude_max_tokens = int(os.getenv("CLAUDE_MAX_TOKENS", s.claude_max_tokens))
         s.claude_timeout_seconds = float(os.getenv("CLAUDE_TIMEOUT_SECONDS", s.claude_timeout_seconds))
         s.ig_app_secret = os.getenv("IG_APP_SECRET", "")
+        s.ig_app_id = os.getenv("IG_APP_ID", "")
         s.ig_access_token = os.getenv("IG_ACCESS_TOKEN", "")
         s.ig_verify_token = os.getenv("IG_VERIFY_TOKEN", "")
         s.graph_api_version = os.getenv("GRAPH_API_VERSION", s.graph_api_version)
@@ -121,4 +124,5 @@ class Settings:
             s.public_url = f"https://{os.environ['RAILWAY_PUBLIC_DOMAIN']}"
         s.public_url = s.public_url.rstrip("/")
         s.playground_token = os.getenv("PLAYGROUND_TOKEN", "")
+        s.admin_token = os.getenv("ADMIN_TOKEN", "") or s.playground_token
         return s
