@@ -199,6 +199,12 @@ class InstagramClient:
             "https://graph.instagram.com/refresh_access_token",
             params={"grant_type": "ig_refresh_token", "access_token": self._token()},
         )
-        resp.raise_for_status()
+        if resp.is_error:
+            # Токен стоит в адресе запроса, поэтому стандартная ошибка httpx его бы раскрыла.
+            try:
+                detail = resp.json().get("error", {}).get("message", "")
+            except ValueError:
+                detail = ""
+            raise RuntimeError(f"Instagram вернул HTTP {resp.status_code}: {detail or 'без описания'}")
         data = resp.json()
         return data["access_token"], int(data.get("expires_in", 0))

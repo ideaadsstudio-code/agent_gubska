@@ -724,6 +724,8 @@ class Service:
 
     async def check_token(self) -> None:
         """Продлевает долгий токен Instagram и напоминает, если срок подходит к концу."""
+        if not (self.db.kv_get("ig_token") or self.settings.ig_access_token):
+            return  # Instagram ещё не подключён
         now = self.clock()
         expires_at = float(self.db.kv_get("ig_token_expires_at", "0") or 0)
         last_try = float(self.db.kv_get("ig_token_last_refresh_try", "0") or 0)

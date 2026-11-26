@@ -176,3 +176,17 @@ async def test_register_webhooks(env, settings):
     await env.service.register_webhooks()
     assert ("tg", "https://bot.example/webhooks/telegram", "tg-secret") in calls
     assert ("ig", "messages,messaging_referral") in calls
+
+
+async def test_refresh_error_does_not_leak_token():
+    from app.instagram import InstagramClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(400, json={"error": {"message": "Invalid OAuth access token"}})
+
+    ig = InstagramClient(lambda: "SECRET-TOKEN-123", http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    try:
+        await ig.refresh_token()
+        raise AssertionError("expected error")
+    except RuntimeError as e:
+        assert "SECRET-TOKEN-123" not in str(e) and "Invalid OAuth" in str(e)
