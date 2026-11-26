@@ -229,3 +229,14 @@ async def test_send_error_shows_meta_reason_without_token():
         raise AssertionError("expected error")
     except RuntimeError as e:
         assert "Outside of allowed window" in str(e) and "code 10" in str(e) and "PAGE-TOKEN" not in str(e)
+
+
+def test_http_client_logs_silenced(settings, monkeypatch):
+    import logging
+
+    import app.main as m
+
+    monkeypatch.setattr(m, "Database", lambda path: __import__("app.db", fromlist=["Database"]).Database(":memory:"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    m.build_service(settings)
+    assert logging.getLogger("httpx2").getEffectiveLevel() >= logging.WARNING

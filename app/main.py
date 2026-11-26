@@ -28,6 +28,9 @@ log = logging.getLogger(__name__)
 
 def build_service(settings: Settings) -> Service:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # HTTP-библиотеки пишут в лог полный адрес запроса, а в адресах Telegram и Meta бывают токены.
+    for noisy in ("httpx2", "httpx", "httpcore", "httpcore2"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     db = Database(settings.db_path)
     # ANTHROPIC_API_KEY читается SDK из окружения.
     client = anthropic.AsyncAnthropic(max_retries=2)
