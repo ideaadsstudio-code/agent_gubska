@@ -160,3 +160,40 @@ def test_estimate_per_100_dialogs():
     _, sonnet = estimate(threads, "artist", "claude-sonnet-5-5")
     _, opus = estimate(threads, "artist", "claude-opus-5-5")
     assert sonnet < opus and sonnet < 1.0
+
+
+async def test_fetch_history_retries_timeouts():
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("slow", request=request)
+        return httpx.Response(200, json={"data": []})
+
+    import app.instagram as igmod
+
+    async def no_sleep(_s):
+        return None
+
+    orig = igmod.asyncio.sleep
+    igmod.asyncio.sleep = no_sleep
+    try:
+        ig = InstagramClient(lambda: "PAGE", mode="facebook", http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+        assert await ig.fetch_history(10) == []
+    finally:
+        igmod.asyncio.sleep = orig
+    assert calls["n"] == 2
+
+
+def test_error_without_message_shows_type(env, settings, monkeypatch):
+    app, _ = make_app(env, settings, monkeypatch, [])
+
+    async def boom(*a, **k):
+        raise TimeoutError()
+
+    env.service.ig.own_account = boom
+    with TestClient(app) as c:
+        c.post("/admin/analysis/start", data={"token": "admin123"})
+    state = json.loads(env.db.kv_get(STATE_KEY))
+    assert state["error"] == "TimeoutError"

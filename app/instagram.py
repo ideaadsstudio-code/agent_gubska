@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import logging
@@ -233,11 +234,11 @@ class InstagramClient:
         headers = {"Authorization": f"Bearer {self._token()}"}
         msg_fields = "id,created_time,from,message"
         url = f"{self.base}/me/conversations"
-        params: dict | None = {"platform": "instagram", "limit": "25",
+        params: dict | None = {"platform": "instagram", "limit": "10",
                                "fields": f"id,updated_time,messages{{{msg_fields}}}"}
         conversations: list[dict] = []
         while url and len(conversations) < max_conversations:
-            resp = await self.http.get(url, params=params, headers=headers)
+            resp = await self._get_with_retry(url, params, headers)
             self._raise_clean(resp, "Список диалогов")
             body = resp.json()
             for conv in body.get("data", []):
@@ -246,7 +247,10 @@ class InstagramClient:
                 for m in raw:
                     if "message" not in m and m.get("id"):
                         # Вложенные поля вернулись не все: дочитываем сообщение отдельно.
-                        r = await self.http.get(f"{self.base}/{m['id']}", params={"fields": msg_fields}, headers=headers)
+                        try:
+                            r = await self._get_with_retry(f"{self.base}/{m['id']}", {"fields": msg_fields}, headers)
+                        except httpx.TimeoutException:
+                            continue
                         if r.is_error:
                             continue
                         m = r.json()
@@ -264,6 +268,17 @@ class InstagramClient:
             url = (body.get("paging") or {}).get("next")
             params = None  # в ссылке next параметры уже есть (без токена: он в заголовке)
         return conversations
+
+    async def _get_with_retry(self, url: str, params: dict | None, headers: dict, attempts: int = 3) -> httpx.Response:
+        """Список диалогов с сообщениями Meta отдаёт медленно: даём больше времени и повторяем при таймауте."""
+        for attempt in range(attempts):
+            try:
+                return await self.http.get(url, params=params, headers=headers, timeout=90.0)
+            except httpx.TimeoutException:
+                if attempt == attempts - 1:
+                    raise RuntimeError("Instagram не ответил за 90 секунд (3 попытки). Попробуйте меньше диалогов.")
+                await asyncio.sleep(2 * (attempt + 1))
+        raise AssertionError("unreachable")
 
     # ---- Instagram Business Login: мастер разрешает доступ по ссылке ----
     @staticmethod

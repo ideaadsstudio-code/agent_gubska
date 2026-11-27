@@ -92,8 +92,9 @@ class AnalysisRunner:
             )
         except Exception as e:
             log.exception("analysis failed")
-            self.save(status="error", error=str(e)[:500])
-            await self.service.alert(f"Анализ переписки не удался: {esc(e)}")
+            detail = f"{type(e).__name__}: {e}" if str(e) else type(e).__name__
+            self.save(status="error", error=detail[:500])
+            await self.service.alert(f"Анализ переписки не удался: {esc(detail)}")
         finally:
             self.running = False
 
