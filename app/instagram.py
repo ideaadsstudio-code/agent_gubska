@@ -140,6 +140,7 @@ class InstagramClient:
         host = "graph.facebook.com" if mode == "facebook" else "graph.instagram.com"
         self.base = f"https://{host}/{api_version}"
         self.http = http or httpx.AsyncClient(timeout=20.0)
+        self.retry_delay = 2.0  # секунды между повторами запроса к Meta (в тестах 0)
 
     async def send_text(self, recipient_id: str, text: str) -> str:
         """Отправляет текст и возвращает message_id. Тег HUMAN_AGENT боту запрещён и не используется."""
@@ -230,54 +231,92 @@ class InstagramClient:
     async def fetch_history(self, max_conversations: int = 300,
                             progress=lambda _msg: None) -> list[dict]:
         """Последние диалоги аккаунта: [{"messages": [{"from_id","from_username","text","ts"}]}].
-        Meta отдаёт подробности только по ~20 последним сообщениям каждого диалога."""
+        Meta отдаёт подробности только по ~20 последним сообщениям каждого диалога.
+
+        Сначала лёгкий список диалогов, потом сообщения каждого диалога отдельно: запрос
+        «диалоги вместе с сообщениями» Meta не успевает выполнить (Timeout, code -2)."""
         headers = {"Authorization": f"Bearer {self._token()}"}
-        msg_fields = "id,created_time,from,message"
-        url = f"{self.base}/me/conversations"
-        params: dict | None = {"platform": "instagram", "limit": "10",
-                               "fields": f"id,updated_time,messages{{{msg_fields}}}"}
-        conversations: list[dict] = []
-        while url and len(conversations) < max_conversations:
-            resp = await self._get_with_retry(url, params, headers)
-            self._raise_clean(resp, "Список диалогов")
-            body = resp.json()
-            for conv in body.get("data", []):
-                raw = (conv.get("messages") or {}).get("data", [])[:20]
-                messages = []
-                for m in raw:
-                    if "message" not in m and m.get("id"):
-                        # Вложенные поля вернулись не все: дочитываем сообщение отдельно.
-                        try:
-                            r = await self._get_with_retry(f"{self.base}/{m['id']}", {"fields": msg_fields}, headers)
-                        except httpx.TimeoutException:
-                            continue
-                        if r.is_error:
-                            continue
-                        m = r.json()
-                    try:
-                        ts = datetime.strptime(m["created_time"], "%Y-%m-%dT%H:%M:%S%z").timestamp()
-                    except (KeyError, ValueError):
-                        ts = 0.0
-                    sender = m.get("from") or {}
-                    messages.append({"from_id": str(sender.get("id", "")), "from_username": sender.get("username", ""),
-                                     "text": m.get("message", "") or "", "ts": ts})
-                conversations.append({"messages": messages})
-                if len(conversations) >= max_conversations:
-                    break
-            progress(f"Загружено диалогов: {len(conversations)}")
+        url: str | None = f"{self.base}/me/conversations"
+        params: dict | None = {"platform": "instagram", "limit": "25", "fields": "id,updated_time"}
+        ids: list[str] = []
+        while url and len(ids) < max_conversations:
+            body = await self._graph_get(url, params, headers, "Список диалогов")
+            ids.extend(c["id"] for c in body.get("data", []) if c.get("id"))
+            progress(f"Найдено диалогов: {min(len(ids), max_conversations)}")
             url = (body.get("paging") or {}).get("next")
             params = None  # в ссылке next параметры уже есть (без токена: он в заголовке)
-        return conversations
+        ids = ids[:max_conversations]
 
-    async def _get_with_retry(self, url: str, params: dict | None, headers: dict, attempts: int = 3) -> httpx.Response:
-        """Список диалогов с сообщениями Meta отдаёт медленно: даём больше времени и повторяем при таймауте."""
-        for attempt in range(attempts):
+        sem = asyncio.Semaphore(4)
+        done = {"n": 0, "skipped": 0}
+
+        async def one(conv_id: str) -> dict | None:
+            async with sem:
+                try:
+                    msgs = await self._conversation_messages(conv_id, headers)
+                except Exception:
+                    log.warning("skip conversation %s", conv_id)
+                    done["skipped"] += 1
+                    msgs = None
+                done["n"] += 1
+                if done["n"] % 10 == 0 or done["n"] == len(ids):
+                    progress(f"Загружено диалогов: {done['n']}/{len(ids)}")
+                return {"messages": msgs} if msgs is not None else None
+
+        results = await asyncio.gather(*(one(i) for i in ids))
+        if done["skipped"]:
+            progress(f"Загружено диалогов: {len(ids) - done['skipped']}, пропущено из-за ошибок Meta: {done['skipped']}")
+        return [r for r in results if r is not None]
+
+    async def _conversation_messages(self, conv_id: str, headers: dict) -> list[dict]:
+        msg_fields = "id,created_time,from,message"
+        try:
+            body = await self._graph_get(f"{self.base}/{conv_id}",
+                                         {"fields": f"messages.limit(20){{{msg_fields}}}"}, headers, "Диалог")
+            raw = (body.get("messages") or {}).get("data", [])
+        except RuntimeError:
+            # Тяжело даже так: берём только id сообщений и дочитываем каждое отдельно.
+            body = await self._graph_get(f"{self.base}/{conv_id}", {"fields": "messages.limit(20){id}"}, headers, "Диалог")
+            raw = (body.get("messages") or {}).get("data", [])
+        out = []
+        for m in raw[:20]:
+            if "message" not in m and m.get("id"):
+                try:
+                    m = await self._graph_get(f"{self.base}/{m['id']}", {"fields": msg_fields}, headers, "Сообщение")
+                except RuntimeError:
+                    continue
             try:
-                return await self.http.get(url, params=params, headers=headers, timeout=90.0)
+                ts = datetime.strptime(m["created_time"], "%Y-%m-%dT%H:%M:%S%z").timestamp()
+            except (KeyError, ValueError):
+                ts = 0.0
+            sender = m.get("from") or {}
+            out.append({"from_id": str(sender.get("id", "")), "from_username": sender.get("username", ""),
+                        "text": m.get("message", "") or "", "ts": ts})
+        return out
+
+    async def _graph_get(self, url: str, params: dict | None, headers: dict, what: str, attempts: int = 3) -> dict:
+        """GET с повтором при таймауте: сетевом, 5xx или таймауте самой Meta (HTTP 400, code -2)."""
+        for attempt in range(attempts):
+            last = attempt == attempts - 1
+            try:
+                resp = await self.http.get(url, params=params, headers=headers, timeout=90.0)
             except httpx.TimeoutException:
-                if attempt == attempts - 1:
-                    raise RuntimeError("Instagram не ответил за 90 секунд (3 попытки). Попробуйте меньше диалогов.")
-                await asyncio.sleep(2 * (attempt + 1))
+                if last:
+                    raise RuntimeError(f"{what}: Instagram не ответил за 90 секунд")
+                await asyncio.sleep(self.retry_delay * (attempt + 1))
+                continue
+            if not resp.is_error:
+                return resp.json()
+            retryable = resp.status_code >= 500
+            try:
+                err = resp.json().get("error") or {}
+                retryable = retryable or err.get("code") in (-2, 1, 2, 4) or err.get("is_transient") is True
+            except ValueError:
+                pass
+            if retryable and not last:
+                await asyncio.sleep(self.retry_delay * (attempt + 1))
+                continue
+            self._raise_clean(resp, what)
         raise AssertionError("unreachable")
 
     # ---- Instagram Business Login: мастер разрешает доступ по ссылке ----

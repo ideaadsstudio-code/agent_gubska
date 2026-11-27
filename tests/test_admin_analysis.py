@@ -18,40 +18,52 @@ OWNER_ID = "17841462392047857"
 
 
 def graph_handler(seen: list):
+    full = "messages.limit(20){id,created_time,from,message}"
+
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(request)
         path = request.url.path
-        if path.endswith("/me") and "instagram_business_account" in request.url.params.get("fields", ""):
+        fields = request.url.params.get("fields", "")
+        if path.endswith("/me") and "instagram_business_account" in fields:
             return httpx.Response(200, json={"instagram_business_account": {"id": OWNER_ID, "username": "tattoo.by.gubska"}})
         if path.endswith("/me/conversations"):
             if request.url.params.get("after") == "p2":
-                return httpx.Response(200, json={"data": [{"id": "c3", "messages": {"data": [
-                    {"id": "m31", "created_time": "2026-10-01T10:00:00+0000", "from": {"id": "903", "username": "brand"},
-                     "message": "Collab offer for your page"},
-                ]}}]})
-            return httpx.Response(200, json={
-                "data": [
-                    {"id": "c1", "messages": {"data": [
-                        {"id": "m12", "created_time": "2026-09-01T10:05:00+0000", "from": {"id": OWNER_ID, "username": "tattoo.by.gubska"},
-                         "message": "Привет, Катя! Fine line 10 см от 3000 грн"},
-                        {"id": "m11", "created_time": "2026-09-01T10:00:00+0000", "from": {"id": "901", "username": "kate.ink"},
-                         "message": "Привет! Сколько стоит тату 10 см? Мой номер +380 67 123 45 67"},
-                    ]}},
-                    {"id": "c2", "messages": {"data": [{"id": "m21"}]}},  # вложенные поля не пришли
-                ],
-                "paging": {"next": "https://graph.facebook.com/v24.0/me/conversations?after=p2"},
-            })
+                return httpx.Response(200, json={"data": [{"id": "c3"}]})
+            return httpx.Response(200, json={"data": [{"id": "c1"}, {"id": "c2"}],
+                                             "paging": {"next": "https://graph.facebook.com/v24.0/me/conversations?after=p2"}})
+        if path.endswith("/c1") and fields == full:
+            return httpx.Response(200, json={"messages": {"data": [
+                {"id": "m12", "created_time": "2026-09-01T10:05:00+0000", "from": {"id": OWNER_ID, "username": "tattoo.by.gubska"},
+                 "message": "Привет, Катя! Fine line 10 см от 3000 грн"},
+                {"id": "m11", "created_time": "2026-09-01T10:00:00+0000", "from": {"id": "901", "username": "kate.ink"},
+                 "message": "Привет! Сколько стоит тату 10 см? Мой номер +380 67 123 45 67"},
+            ]}})
+        if path.endswith("/c2") and fields == full:
+            # Meta не успевает: HTTP 400 Timeout, code -2.
+            return httpx.Response(400, json={"error": {"message": "Timeout", "code": -2}})
+        if path.endswith("/c2"):
+            return httpx.Response(200, json={"messages": {"data": [{"id": "m21"}]}})
         if path.endswith("/m21"):
             return httpx.Response(200, json={"id": "m21", "created_time": "2026-09-02T10:00:00+0000",
                                              "from": {"id": "902", "username": "bestie"}, "message": "Ань, как мама?"})
+        if path.endswith("/c3"):
+            return httpx.Response(200, json={"messages": {"data": [
+                {"id": "m31", "created_time": "2026-10-01T10:00:00+0000", "from": {"id": "903", "username": "brand"},
+                 "message": "Collab offer for your page"},
+            ]}})
         return httpx.Response(404, json={"error": {"message": "not found"}})
     return handler
 
 
+def make_ig(handler) -> InstagramClient:
+    ig = InstagramClient(lambda: "PAGE", mode="facebook", http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
+    ig.retry_delay = 0
+    return ig
+
+
 async def test_fetch_history_pages_and_fills_missing_fields():
     seen: list = []
-    ig = InstagramClient(lambda: "PAGE", http=httpx.AsyncClient(transport=httpx.MockTransport(graph_handler(seen))),
-                         mode="facebook")
+    ig = make_ig(graph_handler(seen))
     owner = await ig.own_account()
     assert owner == (OWNER_ID, "tattoo.by.gubska")
     convs = await ig.fetch_history(max_conversations=10)
@@ -68,8 +80,7 @@ async def test_fetch_history_pages_and_fills_missing_fields():
 def make_app(env, settings, monkeypatch, haiku_topics: list[str]):
     settings.playground_token = settings.admin_token = "admin123"
     seen: list = []
-    env.service.ig = InstagramClient(lambda: "PAGE", mode="facebook",
-                                     http=httpx.AsyncClient(transport=httpx.MockTransport(graph_handler(seen))))
+    env.service.ig = make_ig(graph_handler(seen))
     haiku = FakeClaude()
     haiku.queue(*[topic(t) for t in haiku_topics])
     env.service.classifier = TopicClassifier(haiku)
@@ -171,18 +182,8 @@ async def test_fetch_history_retries_timeouts():
             raise httpx.ReadTimeout("slow", request=request)
         return httpx.Response(200, json={"data": []})
 
-    import app.instagram as igmod
-
-    async def no_sleep(_s):
-        return None
-
-    orig = igmod.asyncio.sleep
-    igmod.asyncio.sleep = no_sleep
-    try:
-        ig = InstagramClient(lambda: "PAGE", mode="facebook", http=httpx.AsyncClient(transport=httpx.MockTransport(handler)))
-        assert await ig.fetch_history(10) == []
-    finally:
-        igmod.asyncio.sleep = orig
+    ig = make_ig(handler)
+    assert await ig.fetch_history(10) == []
     assert calls["n"] == 2
 
 
