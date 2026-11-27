@@ -7,10 +7,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import hmac
 import json
 import logging
+import secrets
 import time
+import zipfile
+from pathlib import Path
 from typing import Any
 
 from urllib.parse import parse_qs, quote
@@ -20,13 +24,14 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from .classifier import TopicClassifier
 from .config import Settings
-from .history_analysis import Message, Thread, analyze_threads, estimate
+from .history_analysis import Message, Thread, analyze_threads, estimate, find_owner, read_export
 from .service import Service
 from .telegram import esc
 
 log = logging.getLogger(__name__)
 
 STATE_KEY = "analysis:latest"
+MAX_UPLOAD_BYTES = 2 * 1024**3
 
 
 def threads_from_api(conversations: list[dict], owner_id: str, owner_name: str) -> list[Thread]:
@@ -60,16 +65,42 @@ class AnalysisRunner:
         self.service.db.kv_set(STATE_KEY, json.dumps(state, ensure_ascii=False))
 
     async def run(self, max_conversations: int, max_usd: float) -> None:
-        if self.running:
-            return
-        self.running = True
-        try:
-            self.save(status="running", step="Загрузка диалогов из Instagram", started_at=time.time(), error="")
+        """Источник — переписка через API Instagram."""
+        async def load() -> tuple[list[Thread], str]:
+            self.save(step="Загрузка диалогов из Instagram")
             ig = self.service.ig
             owner_id, owner_name = await ig.own_account()
             owner_name = owner_name or "artist"
             conversations = await ig.fetch_history(max_conversations, progress=lambda m: self.save(step=m))
-            threads = [t for t in threads_from_api(conversations, owner_id, owner_name) if t.messages]
+            return [t for t in threads_from_api(conversations, owner_id, owner_name) if t.messages], owner_name
+
+        await self._run(load, max_usd, source="api")
+
+    async def run_export(self, path: Path, max_conversations: int, max_usd: float) -> None:
+        """Источник — ZIP-выгрузка из Instagram (Центр аккаунтов → Экспорт информации → Сообщения, JSON).
+        Файл удаляется сразу после разбора."""
+        async def load() -> tuple[list[Thread], str]:
+            self.save(step="Разбор выгрузки")
+            try:
+                threads = await asyncio.to_thread(read_export, path)
+            except zipfile.BadZipFile:
+                raise ValueError("Файл не похож на ZIP-архив выгрузки Instagram")
+            finally:
+                path.unlink(missing_ok=True)
+            owner = find_owner(threads)
+            threads = [t for t in threads if t.messages]
+            threads.sort(key=lambda t: t.messages[-1].ts, reverse=True)
+            return threads[:max_conversations], owner
+
+        await self._run(load, max_usd, source="export")
+
+    async def _run(self, load, max_usd: float, source: str) -> None:
+        if self.running:
+            return
+        self.running = True
+        try:
+            self.save(status="running", started_at=time.time(), error="", source=source)
+            threads, owner_name = await load()
             model = self.settings.analysis_model
             tokens, usd = estimate(threads, owner_name, model)
             self.save(conversations=len(threads), estimate_usd=round(usd, 2), account=owner_name)
@@ -150,7 +181,32 @@ def build_router(settings: Settings, service: Service) -> APIRouter:
             if status == "too_expensive":
                 parts.append(f"<div class='card'><p class='warn'>{esc(st.get('step', ''))}. "
                              "Уменьшите число диалогов или поднимите лимит.</p></div>")
-            parts.append(f"<div class='card'>{form}</div>")
+            parts.append(f"<div class='card'><h2>Из Instagram через API</h2>{form}</div>")
+            parts.append(f"""<div class='card'><h2>Из ZIP-выгрузки Instagram</h2>
+<p class="muted">Если API не отдаёт переписку (большая история, таймауты Meta), загрузите выгрузку: Instagram мастера →
+Центр аккаунтов → Ваша информация и разрешения → Экспорт информации → только «Сообщения», за всё время, формат JSON,
+низкое качество медиа. Архив разбирается на сервере и сразу удаляется.</p>
+<input type="file" id="zip" accept=".zip,application/zip">
+<label>Диалогов, не больше <input type="number" id="zmax" value="300" min="10" max="2000"></label>
+<label>Лимит, $ <input type="number" id="zusd" value="15" min="1" max="200"></label>
+<button type="button" id="up">Загрузить и запустить</button>
+<p id="upstatus" class="muted"></p>
+<script>
+document.getElementById("up").onclick = () => {{
+  const f = document.getElementById("zip").files[0];
+  const st = document.getElementById("upstatus");
+  if (!f) {{ st.textContent = "Выберите файл .zip"; return; }}
+  const q = new URLSearchParams({{token: {json.dumps(token)}, max_conversations: document.getElementById("zmax").value,
+                                  max_usd: document.getElementById("zusd").value}});
+  const x = new XMLHttpRequest();
+  x.open("POST", "/admin/analysis/upload?" + q.toString());
+  x.setRequestHeader("Content-Type", "application/zip");
+  x.upload.onprogress = (e) => {{ if (e.lengthComputable) st.textContent = "Загрузка: " + Math.round(e.loaded / e.total * 100) + "%"; }};
+  x.onload = () => {{ if (x.status < 300) location.reload(); else st.textContent = "Ошибка загрузки: " + x.status + " " + x.responseText; }};
+  x.onerror = () => {{ st.textContent = "Сеть оборвалась, попробуйте ещё раз"; }};
+  x.send(f);
+}};
+</script></div>""")
         if status == "done":
             finished = time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(st.get("finished_at", 0)))
             parts.append(f"""<div class='card'><h2>Результат от {finished}, @{esc(st.get('account', ''))}</h2>
@@ -179,6 +235,30 @@ def build_router(settings: Settings, service: Service) -> APIRouter:
         if not runner.running:
             service._spawn(runner.run(max(10, min(max_conversations, 2000)), max(1.0, min(max_usd, 200.0))))
         return RedirectResponse(f"/admin/analysis?token={quote(token)}", status_code=303)
+
+    @router.post("/admin/analysis/upload")
+    async def upload(request: Request, token: str = "", max_conversations: int = 300, max_usd: float = 15):
+        check(token)
+        if runner.running:
+            raise HTTPException(status_code=409, detail="Анализ уже идёт")
+        path = Path(settings.db_path).parent / f"upload-{secrets.token_hex(8)}.zip"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        size = 0
+        try:
+            with path.open("wb") as f:
+                async for chunk in request.stream():
+                    size += len(chunk)
+                    if size > MAX_UPLOAD_BYTES:
+                        raise HTTPException(status_code=413, detail="Файл больше 2 ГБ: выгрузите только сообщения, низкое качество медиа")
+                    f.write(chunk)
+        except BaseException:
+            path.unlink(missing_ok=True)
+            raise
+        if size == 0:
+            path.unlink(missing_ok=True)
+            raise HTTPException(status_code=400, detail="Пустой файл")
+        service._spawn(runner.run_export(path, max(10, min(max_conversations, 2000)), max(1.0, min(max_usd, 200.0))))
+        return {"ok": True, "bytes": size}
 
     router.runner = runner  # type: ignore[attr-defined]  # для тестов
     return router

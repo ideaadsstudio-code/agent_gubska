@@ -220,3 +220,57 @@ async def test_list_shrinks_page_when_meta_asks_for_less():
     convs = await make_ig(handler).fetch_history(10)
     assert len(convs) == 2
     assert seen_limits[:3] == ["25", "10", "5"] and seen_limits[-1] == "5"
+
+
+class ContentClassifier:
+    model = "claude-haiku-5-5"
+
+    async def classify(self, lines):
+        from app.classifier import Verdict
+
+        return Verdict("tattoo" if any("тату" in line for line in lines) else "not_tattoo", 0.001)
+
+
+def test_upload_export_zip(env, settings, monkeypatch, tmp_path):
+    from test_analyze_export import make_export
+
+    app, sent = make_app(env, settings, monkeypatch, [])
+    env.service.classifier = ContentClassifier()
+    zip_bytes = make_export(tmp_path).read_bytes()
+    with TestClient(app) as c:
+        bad = c.post("/admin/analysis/upload", params={"token": "nope"}, content=zip_bytes)
+        assert bad.status_code == 403
+        r = c.post("/admin/analysis/upload", params={"token": "admin123", "max_usd": "15"}, content=zip_bytes,
+                   headers={"Content-Type": "application/zip"})
+        assert r.status_code == 200
+    state = json.loads(env.db.kv_get(STATE_KEY))
+    assert state["status"] == "done" and state["source"] == "export"
+    assert state["tattoo"] == 1 and state["personal"] == 2
+    batch = sent[0]["messages"][0]["content"]
+    assert "3000 грн" in batch and "Катя" not in batch and "+380" not in batch
+    # Загруженный архив удалён.
+    from pathlib import Path
+    assert not list(Path(settings.db_path).parent.glob("upload-*.zip"))
+
+
+def test_upload_rejects_non_zip(env, settings, monkeypatch):
+    app, _ = make_app(env, settings, monkeypatch, [])
+    with TestClient(app) as c:
+        c.post("/admin/analysis/upload", params={"token": "admin123"}, content=b"not a zip")
+    state = json.loads(env.db.kv_get(STATE_KEY))
+    assert state["status"] == "error" and "ZIP" in state["error"]
+
+
+async def test_list_shrinks_on_meta_timeouts_too():
+    limits: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/me/conversations"):
+            limits.append(request.url.params.get("limit"))
+            if int(request.url.params.get("limit")) > 2:
+                return httpx.Response(400, json={"error": {"message": "Timeout", "code": -2}})
+            return httpx.Response(200, json={"data": [{"id": "c1"}]})
+        return httpx.Response(200, json={"messages": {"data": []}})
+
+    convs = await make_ig(handler).fetch_history(10)
+    assert len(convs) == 1 and limits[-1] == "2"

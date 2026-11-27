@@ -32,57 +32,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from app.classifier import TopicClassifier  # noqa: E402
 from app import history_analysis as core  # noqa: E402
 from app.history_analysis import (  # noqa: E402,F401  (реэкспорт для тестов и обратной совместимости)
-    CHUNK_CHARS, Message, Thread, anonymize, chunks, estimate, transcript,
+    CHUNK_CHARS, Message, Thread, anonymize, chunks, estimate, find_owner, fix_text, read_export, transcript,
 )
-
-# ---------------------------------------------------------------- разбор архива
-def fix_text(s: str) -> str:
-    """Instagram пишет UTF-8 как latin-1 escape: 'Ð¿Ñ€Ð¸' вместо 'при'."""
-    try:
-        return s.encode("latin-1").decode("utf-8")
-    except (UnicodeEncodeError, UnicodeDecodeError):
-        return s
-
-
-def read_export(source: Path) -> list[Thread]:
-    files: dict[str, list[dict[str, Any]]] = {}
-
-    def add(name: str, raw: bytes) -> None:
-        if not re.search(r"messages/(inbox|message_requests)/[^/]+/message_\d+\.json$", name):
-            return
-        files.setdefault(name.rsplit("/", 1)[0], []).append(json.loads(raw))
-
-    if source.is_dir():
-        for p in source.rglob("message_*.json"):
-            add(p.as_posix(), p.read_bytes())
-    else:
-        with zipfile.ZipFile(source) as z:
-            for name in z.namelist():
-                if name.endswith(".json"):
-                    add(name, z.read(name))
-
-    threads = []
-    for path, parts in files.items():
-        participants = sorted({fix_text(p["name"]) for part in parts for p in part.get("participants", [])})
-        msgs = []
-        for part in parts:
-            for m in part.get("messages", []):
-                text = fix_text(m.get("content", "") or "")
-                if m.get("share", {}).get("link") and not text:
-                    text = "[shared post]"
-                msgs.append(Message(fix_text(m.get("sender_name", "")), text, m.get("timestamp_ms", 0) / 1000,
-                                    photo=bool(m.get("photos"))))
-        msgs.sort(key=lambda m: m.ts)
-        threads.append(Thread(path, participants, msgs))
-    return threads
-
-
-def find_owner(threads: list[Thread]) -> str:
-    counts = Counter(p for t in threads for p in t.participants)
-    if not counts:
-        raise SystemExit("В архиве не найдено диалогов. Проверьте, что выгружены «Сообщения» в формате JSON.")
-    return counts.most_common(1)[0][0]
-
 
 async def analyze(threads: list[Thread], owner: str, out: Path, client: Any, classifier: TopicClassifier) -> dict[str, Any]:
     """Анализ и запись черновиков в папку out."""
@@ -110,7 +61,10 @@ def main() -> None:
     args = parser.parse_args()
 
     threads = read_export(args.source)
-    owner = args.owner or find_owner(threads)
+    try:
+        owner = args.owner or find_owner(threads)
+    except ValueError as e:
+        raise SystemExit(str(e))
     msgs = sum(len(t.messages) for t in threads)
     tokens, usd = estimate(threads, owner)
     print(f"Диалогов: {len(threads)}, сообщений: {msgs}. Мастер в выгрузке: «{owner}».")

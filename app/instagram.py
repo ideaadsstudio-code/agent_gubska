@@ -342,6 +342,9 @@ class InstagramClient:
                 err = resp.json().get("error") or {}
                 if "reduce the amount of data" in (err.get("message") or "").lower():
                     raise ReduceDataError(f"{what}: Meta просит запрашивать меньше данных за раз")
+                if err.get("code") == -2 and last:
+                    # Таймаут на стороне Meta даже после повторов: запрос тоже надо уменьшить.
+                    raise ReduceDataError(f"{what}: Meta не успевает ответить (Timeout)")
                 retryable = retryable or err.get("code") in (-2, 1, 2, 4) or err.get("is_transient") is True
             except ValueError:
                 pass
