@@ -93,7 +93,7 @@ async def test_pipeline(tmp_path, monkeypatch):
             return msg(text(json.dumps({"knowledge_base": "# KB", "style_guide": "# Style", "test_cases": "# Tests"})))
         return msg(text("Цены: fine line 10 см от 3000 грн"))
 
-    monkeypatch.setattr(ax, "call_model", fake_call)
+    monkeypatch.setattr(ax.core, "call_model", fake_call)
     out = tmp_path / "out"
     result = await ax.analyze(threads, OWNER, out, client=None, classifier=TopicClassifier(haiku))
     assert result["tattoo"] == 1 and result["personal"] == 2

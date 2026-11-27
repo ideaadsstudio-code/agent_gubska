@@ -209,6 +209,62 @@ class InstagramClient:
         )
         self._raise_clean(resp, "Подписка на webhook")
 
+    # ---- история переписки для анализа (/admin/analysis) ----
+    async def own_account(self) -> tuple[str, str]:
+        """(id, username) Instagram-аккаунта, от имени которого работает бот."""
+        headers = {"Authorization": f"Bearer {self._token()}"}
+        if self.mode == "facebook":
+            resp = await self.http.get(f"{self.base}/me", params={"fields": "instagram_business_account{id,username}"},
+                                       headers=headers)
+            self._raise_clean(resp, "Аккаунт Instagram страницы")
+            acc = resp.json().get("instagram_business_account") or {}
+            if not acc.get("id"):
+                raise RuntimeError("К странице не привязан Instagram (нет instagram_business_account)")
+            return str(acc["id"]), acc.get("username", "")
+        resp = await self.http.get(f"{self.base}/me", params={"fields": "user_id,username"}, headers=headers)
+        self._raise_clean(resp, "Аккаунт Instagram")
+        data = resp.json()
+        return str(data.get("user_id") or data.get("id")), data.get("username", "")
+
+    async def fetch_history(self, max_conversations: int = 300,
+                            progress=lambda _msg: None) -> list[dict]:
+        """Последние диалоги аккаунта: [{"messages": [{"from_id","from_username","text","ts"}]}].
+        Meta отдаёт подробности только по ~20 последним сообщениям каждого диалога."""
+        headers = {"Authorization": f"Bearer {self._token()}"}
+        msg_fields = "id,created_time,from,message"
+        url = f"{self.base}/me/conversations"
+        params: dict | None = {"platform": "instagram", "limit": "25",
+                               "fields": f"id,updated_time,messages{{{msg_fields}}}"}
+        conversations: list[dict] = []
+        while url and len(conversations) < max_conversations:
+            resp = await self.http.get(url, params=params, headers=headers)
+            self._raise_clean(resp, "Список диалогов")
+            body = resp.json()
+            for conv in body.get("data", []):
+                raw = (conv.get("messages") or {}).get("data", [])[:20]
+                messages = []
+                for m in raw:
+                    if "message" not in m and m.get("id"):
+                        # Вложенные поля вернулись не все: дочитываем сообщение отдельно.
+                        r = await self.http.get(f"{self.base}/{m['id']}", params={"fields": msg_fields}, headers=headers)
+                        if r.is_error:
+                            continue
+                        m = r.json()
+                    try:
+                        ts = datetime.strptime(m["created_time"], "%Y-%m-%dT%H:%M:%S%z").timestamp()
+                    except (KeyError, ValueError):
+                        ts = 0.0
+                    sender = m.get("from") or {}
+                    messages.append({"from_id": str(sender.get("id", "")), "from_username": sender.get("username", ""),
+                                     "text": m.get("message", "") or "", "ts": ts})
+                conversations.append({"messages": messages})
+                if len(conversations) >= max_conversations:
+                    break
+            progress(f"Загружено диалогов: {len(conversations)}")
+            url = (body.get("paging") or {}).get("next")
+            params = None  # в ссылке next параметры уже есть (без токена: он в заголовке)
+        return conversations
+
     # ---- Instagram Business Login: мастер разрешает доступ по ссылке ----
     @staticmethod
     def _raise_clean(resp: httpx.Response, what: str) -> None:

@@ -18,6 +18,7 @@ from .config import Settings
 from .db import Database
 from .images import ImageStore
 from .instagram import InstagramClient, verify_signature
+from .admin_analysis import build_router as build_admin_analysis
 from .ig_auth import build_router as build_ig_auth
 from .playground import build_router as build_playground
 from .service import Service
@@ -70,6 +71,7 @@ def create_app(settings: Settings | None = None, service: Service | None = None,
     app.state.service = service
     app.include_router(build_playground(settings, service.agent, service.classifier, service.db))
     app.include_router(build_ig_auth(settings, service))
+    app.include_router(build_admin_analysis(settings, service))
 
     if settings.playground_token and not settings.playground_token.isalnum():
         log.warning("PLAYGROUND_TOKEN лучше задавать только из букв и цифр: спецсимволы ломаются в адресе страницы.")
