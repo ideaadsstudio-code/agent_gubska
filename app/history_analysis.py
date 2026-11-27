@@ -15,9 +15,9 @@ from typing import Any, Callable
 
 from .agent import FALLBACK_BETA
 from .classifier import TopicClassifier
-from .pricing import cost_usd
+from .pricing import PRICES, cost_usd
 
-ANALYSIS_MODEL = "claude-opus-5-5"
+ANALYSIS_MODEL = "claude-sonnet-5-5"  # можно переопределить настройкой ANALYSIS_MODEL
 CHUNK_CHARS = 300_000  # примерно 100k токенов на пачку диалогов
 
 EMAIL = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
@@ -171,6 +171,7 @@ async def analyze_threads(
     client: Any,
     classifier: TopicClassifier,
     progress: Callable[[str], None] = lambda _msg: None,
+    model: str = ANALYSIS_MODEL,
 ) -> dict[str, Any]:
     """Возвращает черновики (knowledge_base, style_guide, test_cases), список личных контактов и расход."""
     spent = 0.0
@@ -201,7 +202,7 @@ async def analyze_threads(
     for i, batch in enumerate(batches, 1):
         progress(f"Анализ пачки диалогов {i}/{len(batches)}")
         resp = await call_model(
-            client, model=ANALYSIS_MODEL, max_tokens=32000,
+            client, model=model, max_tokens=32000,
             system=CHUNK_PROMPT, messages=[{"role": "user", "content": batch}],
             output_config={"effort": "high"},
             betas=[FALLBACK_BETA], fallbacks="default",
@@ -211,7 +212,7 @@ async def analyze_threads(
 
     progress("Сводка и черновики")
     resp = await call_model(
-        client, model=ANALYSIS_MODEL, max_tokens=64000,
+        client, model=model, max_tokens=64000,
         system=SYNTHESIS_PROMPT,
         messages=[{"role": "user", "content": "\n\n".join(f"<batch_notes>\n{n}\n</batch_notes>" for n in notes)}],
         output_config={"effort": "high", "format": {"type": "json_schema", "schema": SYNTH_SCHEMA}},
@@ -223,9 +224,15 @@ async def analyze_threads(
     return result
 
 
-def estimate(threads: list[Thread], owner: str) -> tuple[int, float]:
+def estimate(threads: list[Thread], owner: str, model: str = ANALYSIS_MODEL) -> tuple[int, float]:
+    """Верхняя оценка: все диалоги считаем тату-диалогами, ответы модели (с рассуждениями) по 12k токенов."""
     chars = sum(len(transcript(t, owner)) for t in threads)
-    tokens = chars // 3
-    # Худший случай: все диалоги про тату; классификация + чтение + заметки и сводка.
-    usd = len(threads) * 0.0005 + tokens * 4 / 1e6 + (chars // CHUNK_CHARS + 2) * 12000 * 20 / 1e6
+    tokens = chars // 3  # кириллица: примерно 3 символа на токен
+    price = PRICES.get(model) or PRICES["claude-opus-5-5"]
+    calls = chars // CHUNK_CHARS + 2  # пачки + сводка
+    usd = (
+        len(threads) * 0.0005  # классификатор Haiku
+        + tokens * price.input / 1e6
+        + calls * 12000 * price.output / 1e6
+    )
     return tokens, usd

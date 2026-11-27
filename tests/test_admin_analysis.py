@@ -120,7 +120,7 @@ def test_analysis_stops_when_too_expensive(env, settings, monkeypatch):
     import app.admin_analysis as aa
 
     app, sent = make_app(env, settings, monkeypatch, [])
-    monkeypatch.setattr(aa, "estimate", lambda threads, owner: (10_000_000, 42.0))
+    monkeypatch.setattr(aa, "estimate", lambda threads, owner, model=None: (10_000_000, 42.0))
     with TestClient(app) as c:
         c.post("/admin/analysis/start", data={"token": "admin123", "max_usd": "15"})
     state = json.loads(env.db.kv_get(STATE_KEY))
@@ -140,3 +140,23 @@ def test_analysis_error_reported(env, settings, monkeypatch):
     state = json.loads(env.db.kv_get(STATE_KEY))
     assert state["status"] == "error" and "не привязан" in state["error"]
     assert any("Анализ переписки не удался" in t for t in env.tg.texts())
+
+
+def test_analysis_uses_sonnet_by_default(env, settings, monkeypatch):
+    app, sent = make_app(env, settings, monkeypatch, ["tattoo", "not_tattoo", "not_tattoo"])
+    with TestClient(app) as c:
+        c.post("/admin/analysis/start", data={"token": "admin123"})
+    assert sent and all(p["model"] == "claude-sonnet-5-5" for p in sent)
+    assert sent[0]["fallbacks"] == "default"
+
+
+def test_estimate_per_100_dialogs():
+    from app.history_analysis import Message, Thread, estimate
+
+    # 100 типичных диалогов: 20 сообщений по ~80 символов.
+    threads = [Thread(f"u{i}", ["artist", f"u{i}"], [
+        Message("artist" if j % 2 else f"u{i}", "Сообщение про тату, размер и цену, примерно такой длины текст." , j)
+        for j in range(20)]) for i in range(100)]
+    _, sonnet = estimate(threads, "artist", "claude-sonnet-5-5")
+    _, opus = estimate(threads, "artist", "claude-opus-5-5")
+    assert sonnet < opus and sonnet < 1.0

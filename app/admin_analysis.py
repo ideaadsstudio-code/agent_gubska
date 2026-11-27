@@ -70,16 +70,18 @@ class AnalysisRunner:
             owner_name = owner_name or "artist"
             conversations = await ig.fetch_history(max_conversations, progress=lambda m: self.save(step=m))
             threads = [t for t in threads_from_api(conversations, owner_id, owner_name) if t.messages]
-            tokens, usd = estimate(threads, owner_name)
+            model = self.settings.analysis_model
+            tokens, usd = estimate(threads, owner_name, model)
             self.save(conversations=len(threads), estimate_usd=round(usd, 2), account=owner_name)
             if usd > max_usd:
                 self.save(status="too_expensive", step=f"Оценка ${usd:.2f} больше лимита ${max_usd:.2f}")
                 return
             client = self.service.agent.client
             classifier = self.service.classifier or TopicClassifier(client, self.settings.classifier_model)
-            result = await analyze_threads(threads, owner_name, client, classifier, progress=lambda m: self.save(step=m))
+            result = await analyze_threads(threads, owner_name, client, classifier,
+                                           progress=lambda m: self.save(step=m), model=model)
             if result["cost_usd"]:
-                self.service.db.record_usage(None, "analysis", 0, 0, 0, 0, result["cost_usd"])
+                self.service.db.record_usage(None, f"{model} (analysis)", 0, 0, 0, 0, result["cost_usd"])
             self.save(status="done", step="Готово", finished_at=time.time(), **{
                 k: result.get(k) for k in ("tattoo", "personal", "personal_contacts", "batches", "cost_usd",
                                            "knowledge_base", "style_guide", "test_cases")

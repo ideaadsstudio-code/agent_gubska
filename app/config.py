@@ -69,6 +69,7 @@ class Settings:
     topic_filter: bool = True
     skip_existing_contacts: bool = True  # не трогать тех, с кем мастер переписывался до запуска бота
     classifier_model: str = "claude-haiku-5-5"
+    analysis_model: str = "claude-sonnet-5-5"  # анализ переписки /admin/analysis
     classifier_max_unclear: int = 3  # после стольких неясных сообщений диалог оставляется мастеру
     bot_launch_at: float = 0.0  # 0: запоминается при первом запуске
     debounce_seconds: float = 4.0
@@ -113,6 +114,7 @@ class Settings:
         s.topic_filter = _bool("TOPIC_FILTER", s.topic_filter)
         s.skip_existing_contacts = _bool("SKIP_EXISTING_CONTACTS", s.skip_existing_contacts)
         s.classifier_model = os.getenv("CLASSIFIER_MODEL", s.classifier_model)
+        s.analysis_model = os.getenv("ANALYSIS_MODEL", s.analysis_model)
         launch = os.getenv("BOT_LAUNCH_DATE")  # например 2026-12-01
         if launch:
             from datetime import datetime, timezone
