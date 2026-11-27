@@ -7,6 +7,7 @@ import hashlib
 import hmac
 import logging
 from datetime import datetime
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -126,6 +127,20 @@ def _pieces(text: str, limit: int) -> list[str]:
     return out
 
 
+class ReduceDataError(RuntimeError):
+    """Meta: «Please reduce the amount of data you're asking for» — запрос надо сделать меньше."""
+
+
+def _with_limit(url: str, params: dict | None, limit: int) -> tuple[str, dict | None]:
+    """Тот же запрос (или ссылка next) с другим размером страницы."""
+    if params is not None:
+        return url, {**params, "limit": str(limit)}
+    parts = urlsplit(url)
+    query = dict(parse_qsl(parts.query))
+    query["limit"] = str(limit)
+    return urlunsplit(parts._replace(query=urlencode(query))), None
+
+
 class InstagramClient:
     """Два режима подключения:
     - "facebook": Instagram API через вход Facebook. Токен страницы Facebook, к которой привязан Instagram,
@@ -237,10 +252,20 @@ class InstagramClient:
         «диалоги вместе с сообщениями» Meta не успевает выполнить (Timeout, code -2)."""
         headers = {"Authorization": f"Bearer {self._token()}"}
         url: str | None = f"{self.base}/me/conversations"
-        params: dict | None = {"platform": "instagram", "limit": "25", "fields": "id,updated_time"}
+        page_size = 25
+        params: dict | None = {"platform": "instagram", "limit": str(page_size), "fields": "id"}
         ids: list[str] = []
         while url and len(ids) < max_conversations:
-            body = await self._graph_get(url, params, headers, "Список диалогов")
+            try:
+                body = await self._graph_get(url, params, headers, "Список диалогов")
+            except ReduceDataError:
+                # Meta просит запрашивать меньше: уменьшаем страницу, пока не начнёт отвечать.
+                if page_size == 1:
+                    raise
+                page_size = {25: 10, 10: 5, 5: 2}.get(page_size, 1)
+                url, params = _with_limit(url, params, page_size)
+                progress(f"Meta просит меньше данных за раз, загружаю по {page_size}")
+                continue
             ids.extend(c["id"] for c in body.get("data", []) if c.get("id"))
             progress(f"Найдено диалогов: {min(len(ids), max_conversations)}")
             url = (body.get("paging") or {}).get("next")
@@ -270,11 +295,16 @@ class InstagramClient:
 
     async def _conversation_messages(self, conv_id: str, headers: dict) -> list[dict]:
         msg_fields = "id,created_time,from,message"
-        try:
-            body = await self._graph_get(f"{self.base}/{conv_id}",
-                                         {"fields": f"messages.limit(20){{{msg_fields}}}"}, headers, "Диалог")
-            raw = (body.get("messages") or {}).get("data", [])
-        except RuntimeError:
+        raw = None
+        for n in (20, 10):
+            try:
+                body = await self._graph_get(f"{self.base}/{conv_id}",
+                                             {"fields": f"messages.limit({n}){{{msg_fields}}}"}, headers, "Диалог")
+                raw = (body.get("messages") or {}).get("data", [])
+                break
+            except RuntimeError:
+                continue
+        if raw is None:
             # Тяжело даже так: берём только id сообщений и дочитываем каждое отдельно.
             body = await self._graph_get(f"{self.base}/{conv_id}", {"fields": "messages.limit(20){id}"}, headers, "Диалог")
             raw = (body.get("messages") or {}).get("data", [])
@@ -310,6 +340,8 @@ class InstagramClient:
             retryable = resp.status_code >= 500
             try:
                 err = resp.json().get("error") or {}
+                if "reduce the amount of data" in (err.get("message") or "").lower():
+                    raise ReduceDataError(f"{what}: Meta просит запрашивать меньше данных за раз")
                 retryable = retryable or err.get("code") in (-2, 1, 2, 4) or err.get("is_transient") is True
             except ValueError:
                 pass

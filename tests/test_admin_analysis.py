@@ -198,3 +198,25 @@ def test_error_without_message_shows_type(env, settings, monkeypatch):
         c.post("/admin/analysis/start", data={"token": "admin123"})
     state = json.loads(env.db.kv_get(STATE_KEY))
     assert state["error"] == "TimeoutError"
+
+
+async def test_list_shrinks_page_when_meta_asks_for_less():
+    seen_limits: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/me/conversations"):
+            limit = request.url.params.get("limit")
+            seen_limits.append(limit)
+            if int(limit) > 5:
+                return httpx.Response(500, json={"error": {
+                    "message": "Please reduce the amount of data you're asking for, then retry your request", "code": 1}})
+            if request.url.params.get("after") == "p2":
+                return httpx.Response(200, json={"data": [{"id": "c2"}]})
+            return httpx.Response(200, json={"data": [{"id": "c1"}], "paging": {
+                "next": f"https://graph.facebook.com/v24.0/me/conversations?limit={limit}&after=p2"}})
+        return httpx.Response(200, json={"messages": {"data": [
+            {"id": "m", "created_time": "2026-09-01T10:00:00+0000", "from": {"id": "9", "username": "u"}, "message": "hi"}]}})
+
+    convs = await make_ig(handler).fetch_history(10)
+    assert len(convs) == 2
+    assert seen_limits[:3] == ["25", "10", "5"] and seen_limits[-1] == "5"
