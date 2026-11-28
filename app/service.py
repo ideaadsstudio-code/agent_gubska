@@ -82,6 +82,7 @@ class Service:
             if not self.db.mark_event(f"{event.kind}:{event.mid}"):
                 continue  # дубль: Meta повторяет доставку
             handled += 1
+            log.info("instagram event: %s", event.kind)
             if event.kind == "message":
                 await self._on_client_message(event)
             elif event.kind == "echo":
@@ -113,6 +114,7 @@ class Service:
             self._mark_from_ad(conv)
             conv = self.db.get_conversation(conv.id) or conv
         if self.settings.topic_filter and conv.scope in {"personal", "ignored"}:
+            log.info("dialog #%s: skipped, scope=%s (left to the artist)", conv.id, conv.scope)
             return  # личная переписка мастера: ничего не храним и не отвечаем
         ts = ev.timestamp or self.clock()
         self.db.add_message(conv.id, "client", ev.text, mid=ev.mid, attachments=ev.attachments, created_at=ts)
@@ -205,6 +207,7 @@ class Service:
                 return
             conv = self.db.get_or_create_conversation(ev.client_id)
         if self.db.one("SELECT id FROM messages WHERE mid = ? OR echo_mid = ?", (ev.mid, ev.mid)):
+            log.info("dialog #%s: own echo (known id)", conv.id)
             return  # наше собственное сообщение, уже сопоставлено
         # Своё эхо узнаём по тексту недавних исходящих бота. По номеру нельзя: эхо может прийти раньше,
         # чем API вернул номер, а при подключении через Facebook-страницу номер эха бывает другим.
@@ -216,6 +219,7 @@ class Service:
         if own:
             self.db.execute("UPDATE messages SET echo_mid = ?, mid = COALESCE(mid, ?) WHERE id = ?",
                             (ev.mid, ev.mid, own["id"]))
+            log.info("dialog #%s: own echo (matched by text)", conv.id)
             return
 
         if self.settings.topic_filter and conv.scope != "tattoo":
@@ -225,6 +229,7 @@ class Service:
             return  # содержимое личной переписки не сохраняем и в Telegram не пересылаем
 
         # Сообщение отправлено не нашим приложением: менеджер из Instagram или Business Suite.
+        log.info("dialog #%s: manager replied directly, bot paused", conv.id)
         ts = ev.timestamp or self.clock()
         self.db.add_message(conv.id, "manager", ev.text, mid=ev.mid, attachments=ev.attachments, created_at=ts)
         self.db.update_conversation(conv.id, last_activity_at=ts)
@@ -293,6 +298,7 @@ class Service:
                 if conv.scope in {"personal", "ignored"}:
                     return
                 scope = await self._decide_scope(conv, rows)
+                log.info("dialog #%s: topic decision = %s", conversation_id, scope)
                 if scope in {"personal", "ignored"}:
                     self._leave_to_artist(conversation_id, scope)
                     return
@@ -305,6 +311,7 @@ class Service:
             lang = self._language(conversation_id, texts)
 
             if conv.status == "manager":
+                log.info("dialog #%s: bot paused (status=manager), not replying", conversation_id)
                 # Бот на паузе. Модель узнает об этих сообщениях, если диалог вернут боту.
                 for r in rows:
                     self.db.add_note(conversation_id, f"While the manager handled the chat, the client wrote: «{self._row_text(r)}»")
@@ -315,6 +322,7 @@ class Service:
             conv = self.db.get_conversation(conversation_id) or conv  # заметки могли добавиться
 
             if any(language.wants_human(t) for t in texts):
+                log.info("dialog #%s: client asked for a human", conversation_id)
                 await self._handoff_on_request(conv, rows, lang)
                 return
 
@@ -339,6 +347,7 @@ class Service:
             try:
                 result = await self.agent.respond(conv.llm_history, user_content, execute_tool)
             except AgentError as e:
+                log.info("dialog #%s: agent failed, template reply", conversation_id)
                 await self._on_agent_failure(conv, user_content, ids, lang, e, escalated["done"])
                 return
 
@@ -351,7 +360,9 @@ class Service:
             if not reply and escalated["done"]:
                 reply = language.pick(language.HANDOFF_ACK, lang)
             if not reply:
+                log.info("dialog #%s: model chose not to reply", conversation_id)
                 return
+            log.info("dialog #%s: reply ready (%s)", conversation_id, "draft" if self.settings.approval_mode else "send")
             await self.deliver(conversation_id, self._with_disclosure(conv, reply, lang))
 
     def _row_text(self, row) -> str:
