@@ -66,6 +66,10 @@ class Agent:
         self.settings = settings
         self.client = client
         # Системный промпт читается один раз: любое изменение байтов сбрасывает кэш.
+        self.set_system(system_prompt)
+
+    def set_system(self, system_prompt: str) -> None:
+        """Меняется только при запуске и когда менеджер принимает выученные правила (редко)."""
         self.system = [{"type": "text", "text": system_prompt, "cache_control": {"type": "ephemeral"}}]
 
     def build_request(self, messages: list[dict[str, Any]]) -> dict[str, Any]:

@@ -74,6 +74,24 @@ CREATE TABLE IF NOT EXISTS usage (
 CREATE TABLE IF NOT EXISTS personal_contacts (
     key TEXT PRIMARY KEY                         -- id:<IGSID> или user:<username>
 );
+CREATE TABLE IF NOT EXISTS learning_examples (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,
+    kind TEXT NOT NULL,                          -- edited | replaced | manual
+    context TEXT NOT NULL DEFAULT '[]',
+    bot_draft TEXT,
+    human_reply TEXT NOT NULL,
+    used INTEGER NOT NULL DEFAULT 0,
+    created_at REAL NOT NULL
+);
+CREATE TABLE IF NOT EXISTS learned_rules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    kind TEXT NOT NULL,
+    rule TEXT NOT NULL,
+    why TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'pending',      -- pending | accepted | rejected | removed
+    created_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS kv (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL

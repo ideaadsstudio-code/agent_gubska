@@ -18,6 +18,7 @@ from .config import Settings
 from .db import Database
 from .images import ImageStore
 from .instagram import InstagramClient, verify_signature
+from .learning import Learner
 from .admin_analysis import build_router as build_admin_analysis
 from .ig_auth import build_router as build_ig_auth
 from .playground import build_router as build_playground
@@ -35,13 +36,17 @@ def build_service(settings: Settings) -> Service:
     db = Database(settings.db_path)
     # ANTHROPIC_API_KEY читается SDK из окружения.
     client = anthropic.AsyncAnthropic(max_retries=2)
-    agent = Agent(settings, client, load_system_prompt(settings))
+    base_prompt = load_system_prompt(settings)
+    agent = Agent(settings, client, base_prompt)
     ig = InstagramClient(lambda: db.kv_get("ig_token") or settings.ig_access_token, settings.graph_api_version,
                          mode=settings.ig_api_mode)
     tg = TelegramClient(settings.telegram_bot_token, settings.telegram_chat_id)
     images = ImageStore(client, settings.retention_days) if settings.attach_images else None
     classifier = TopicClassifier(client, settings.classifier_model) if settings.topic_filter else None
-    return Service(settings, db, agent, ig, tg, images=images, classifier=classifier)
+    service = Service(settings, db, agent, ig, tg, images=images, classifier=classifier)
+    service.learner = Learner(service, base_prompt)
+    service.learner.apply()  # выученные и принятые правила — в системный промпт
+    return service
 
 
 async def _scheduler(service: Service) -> None:

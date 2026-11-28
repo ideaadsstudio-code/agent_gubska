@@ -52,6 +52,7 @@ class Service:
         self.clock = clock
         self.images = images
         self.classifier = classifier
+        self.learner = None  # app.learning.Learner, подключается в build_service
         if not settings.bot_launch_at:
             stored = db.kv_get("bot_launch_at")
             if not stored:
@@ -248,6 +249,13 @@ class Service:
 
         # Сообщение отправлено не нашим приложением: менеджер из Instagram или Business Suite.
         log.info("dialog #%s: manager replied directly, bot paused", conv.id)
+        if self.learner and ev.text:
+            pending = self.db.one(
+                "SELECT text FROM drafts WHERE conversation_id = ? AND status = 'pending' ORDER BY id DESC LIMIT 1",
+                (conv.id,),
+            )
+            self.learner.record(conv.id, "replaced" if pending else "manual", ev.text,
+                                pending["text"] if pending else None)
         ts = ev.timestamp or self.clock()
         self.db.add_message(conv.id, "manager", ev.text, mid=ev.mid, attachments=ev.attachments, created_at=ts)
         self.db.update_conversation(conv.id, last_activity_at=ts)
@@ -589,8 +597,15 @@ class Service:
         obj_id = int(raw_id)
         answer = await self._run_action(action, obj_id, who)
         await self._safe(self.tg.answer_callback(cq.get("id", ""), answer))
+        if action in {"learn_ok", "learn_no"} and message.get("message_id"):
+            await self._safe(self.tg.edit_markup(message["message_id"], None))
+            await self._tg_send(f"🧠 {who}: правило #{obj_id} — {esc(answer.lower())}")
 
     async def _run_action(self, action: str, obj_id: int, who: str) -> str:
+        if action in {"learn_ok", "learn_no"}:
+            if not self.learner:
+                return "Обучение выключено"
+            return self.learner.decide(obj_id, accept=action == "learn_ok")
         if action == "assign":
             conv = self.db.get_conversation(obj_id)
             if not conv:
@@ -657,6 +672,9 @@ class Service:
         if command.startswith(("/personal", "/bot", "/forget")):
             await self._on_command(command)
             return
+        if command.startswith(("/learn", "/rules", "/unrule")) and self.learner:
+            await self._on_learning_command(command)
+            return
         reply_to = message.get("reply_to_message") or {}
         pending = self.db.one(
             "SELECT draft_id FROM tg_pending_edits WHERE tg_prompt_message_id = ?", (reply_to.get("message_id"),)
@@ -674,8 +692,26 @@ class Service:
         self.db.execute("UPDATE drafts SET status = ? WHERE id = ?", ("edited" if ok else "expired", draft["id"]))
         if ok:
             self.db.add_note(cid, f"The manager edited your previous reply before sending. The client actually received: «{text}»")
+            if self.learner:
+                self.learner.record(cid, "edited", text, draft["text"])
         await self._safe(self.tg.edit_markup(draft["tg_message_id"], None))
         await self._tg_send("✅ Исправленный ответ отправлен" if ok else "❌ Не отправлено, см. алерт")
+
+    async def _on_learning_command(self, command: str) -> None:
+        """/learn — разобрать ответы менеджера сейчас; /rules — выученные правила; /unrule N — удалить правило."""
+        assert self.learner
+        name, _, arg = command.partition(" ")
+        name = name.split("@")[0]
+        if name == "/learn":
+            await self._tg_send("🧠 Разбираю ответы менеджера…")
+            self._spawn(self.learner.run(force=True))
+        elif name == "/rules":
+            await self._tg_send(self.learner.rules_listing())
+        elif name == "/unrule":
+            arg = arg.strip().lstrip("#")
+            ok = arg.isdigit() and self.learner.remove(int(arg))
+            await self._tg_send(f"🗑 Правило #{esc(arg)} удалено, бот его больше не применяет." if ok
+                                else "Не нашёл такое принятое правило. Список: /rules")
 
     async def _on_command(self, command: str) -> None:
         """/personal @username: бот никогда не трогает этот контакт.
@@ -837,6 +873,7 @@ class Service:
             self._redact(cid, self._file_ids([r for r in old_rows if r["conversation_id"] == cid]), [])
         self.db.execute("DELETE FROM conversations WHERE COALESCE(last_activity_at, created_at) < ?", (cutoff,))
         self.db.execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
+        self.db.execute("DELETE FROM learning_examples WHERE created_at < ?", (cutoff,))
         self.db.execute("DELETE FROM processed_events WHERE created_at < ?", (self.clock() - 7 * 86400,))
 
     async def check_storage(self) -> None:
@@ -890,3 +927,5 @@ class Service:
             self.db.kv_set("maintenance_day", day)
             await self.purge()
             await self.check_token()
+        if self.learner and now.weekday() == 0 and now.hour >= self.settings.summary_hour_utc:
+            await self.learner.maybe_weekly(self.clock())  # раз в неделю, в понедельник после сводки
