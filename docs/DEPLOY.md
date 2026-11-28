@@ -65,7 +65,9 @@ ngrok http 8000 --url=https://<ваш-домен>.ngrok-free.app
 1. Зарегистрируйтесь на https://railway.com через GitHub и включите тариф **Hobby** ($5 в месяц).
 2. **New Project → Deploy from GitHub repo →** репозиторий `agent_gubska`, ветка с ботом.
    Railway сам найдёт `requirements.txt` и `railway.json` (команда запуска, проверка `/health`, одна копия сервиса).
-3. **Диск для базы:** в сервисе → **Volumes → New Volume**, путь монтирования `/data`.
+3. **Диск для базы:** в сервисе → **Volumes → New Volume**, путь монтирования (Mount path) **ровно `/data`**.
+   Вместе с `DB_PATH=/data/agent.db` это обязательно: иначе база стирается при каждом деплое.
+   Если что-то не так, сервер при старте пришлёт в Telegram предупреждение.
 4. **Публичный адрес:** Settings → Networking → **Generate Domain**. Получится `https://<имя>.up.railway.app`.
    Сервер сам узнаёт его из `RAILWAY_PUBLIC_DOMAIN`.
 5. **Variables** (пока без Instagram):
@@ -81,6 +83,7 @@ ngrok http 8000 --url=https://<ваш-домен>.ngrok-free.app
    | `STUDIO_NAME` | название студии для текстов политики |
    | `PRIVACY_CONTACT` | почта для запросов по данным |
    | `APPROVAL_MODE` | `true` |
+   | `BOT_LAUNCH_DATE` | дата запуска бота, например `2026-11-26`: переписка до неё остаётся мастеру |
 
 6. Проверьте в браузере: `https://<адрес>/health` отвечает `{"ok":true,...}`, открываются `/privacy` и `/data-deletion`.
 

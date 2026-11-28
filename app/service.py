@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -658,6 +659,8 @@ class Service:
             await self._tg_send("Укажите ник: /personal @username или /bot @username")
             return
         conv_row = self.db.one("SELECT id FROM conversations WHERE LOWER(username) = ?", (username,))
+        if conv_row is None and name == "/bot":
+            conv_row = await self._find_by_instagram_username(username)
         if name == "/personal":
             self.db.add_personal_contact(f"user:{username}")
             if conv_row:
@@ -677,6 +680,17 @@ class Service:
                 return
             self.db.update_conversation(conv_row["id"], scope="tattoo", status="bot", needs_disclosure=True)
             await self._tg_send(f"🤖 Диалог с @{esc(username)} отдан боту, он ответит на следующее сообщение клиента.")
+
+    async def _find_by_instagram_username(self, username: str):
+        """У диалогов, оставленных мастеру, ник не хранится: спрашиваем Instagram по каждому такому диалогу."""
+        rows = self.db.all(
+            "SELECT id, ig_user_id FROM conversations WHERE username IS NULL ORDER BY last_activity_at DESC LIMIT 300"
+        )
+        for r in rows:
+            name = await self.ig.get_username(r["ig_user_id"])
+            if name and name.lower().lstrip("@") == username:
+                return r
+        return None
 
     async def forget_conversation(self, conversation_id: int) -> None:
         rows = self.db.all("SELECT attachments FROM messages WHERE conversation_id = ?", (conversation_id,))
@@ -797,8 +811,27 @@ class Service:
         self.db.execute("DELETE FROM messages WHERE created_at < ?", (cutoff,))
         self.db.execute("DELETE FROM processed_events WHERE created_at < ?", (self.clock() - 7 * 86400,))
 
+    async def check_storage(self) -> None:
+        """На Railway база должна лежать на подключённом диске, иначе она стирается при каждом деплое:
+        пропадают диалоги, расход, а «дата запуска» бота сдвигается и старые клиенты считаются личными."""
+        on_railway = bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_PUBLIC_DOMAIN"))
+        if not on_railway or self.settings.db_path == ":memory:":
+            return
+        volume = os.getenv("RAILWAY_VOLUME_MOUNT_PATH", "")
+        db_path = os.path.abspath(self.settings.db_path)
+        if not volume or not db_path.startswith(os.path.abspath(volume).rstrip("/") + "/"):
+            await self.alert(
+                "База данных НЕ на постоянном диске Railway и стирается при каждом деплое. "
+                f"Сейчас DB_PATH={esc(db_path)}, диск: {esc(volume or 'не подключён')}. "
+                "Подключите Volume с путём /data и задайте DB_PATH=/data/agent.db."
+            )
+        if not os.getenv("BOT_LAUNCH_DATE"):
+            log.warning("BOT_LAUNCH_DATE не задан: дата запуска берётся из базы (%s)",
+                        _utc(self.settings.bot_launch_at).strftime("%Y-%m-%d"))
+
     async def register_webhooks(self) -> None:
         """При старте: webhook Telegram и подписка аккаунта Instagram. Повторный вызов безопасен."""
+        await self.check_storage()
         url = self.settings.public_url
         secret = self.settings.telegram_webhook_secret
         if secret and not re.fullmatch(r"[A-Za-z0-9_-]{1,256}", secret):

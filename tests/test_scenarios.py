@@ -534,3 +534,30 @@ def test_db_migration_adds_echo_mid(tmp_path):
     db = Database(str(path))
     cols = {r["name"] for r in db.all("PRAGMA table_info(messages)")}
     assert "echo_mid" in cols
+
+
+async def test_storage_alert_when_db_not_on_volume(env, settings, monkeypatch):
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")
+    settings.db_path = "/app/data/agent.db"
+    await env.service.check_storage()
+    assert any("НЕ на постоянном диске" in t for t in env.tg.texts())
+
+
+async def test_no_storage_alert_when_db_on_volume(env, settings, monkeypatch):
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    monkeypatch.setenv("RAILWAY_VOLUME_MOUNT_PATH", "/data")
+    settings.db_path = "/data/agent.db"
+    await env.service.check_storage()
+    assert env.tg.texts() == []
+
+
+async def test_bot_command_finds_forgotten_dialog_via_instagram(env, settings):
+    settings.topic_filter = True
+    env.ig.existing_contact = True  # диалог отнесён к личным, ник забыт
+    await env.client_says("Hi, how much is a tattoo?")
+    assert env.conv().scope == "personal" and env.conv().username is None
+    env.ig.username = "pochemy.n.e.t"
+    await env.service.handle_telegram({"message": {"chat": {"id": -100}, "text": "/bot @pochemy.n.e.t"}})
+    assert env.conv().scope == "tattoo" and env.conv().status == "bot"
+    assert any("отдан боту" in t for t in env.tg.texts())
