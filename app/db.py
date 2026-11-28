@@ -32,6 +32,7 @@ CREATE TABLE IF NOT EXISTS messages (
     text TEXT NOT NULL DEFAULT '',
     attachments TEXT NOT NULL DEFAULT '[]',
     processed INTEGER NOT NULL DEFAULT 0,        -- для client: уже передано модели
+    echo_mid TEXT,                               -- для bot: номер эха, которым Instagram подтвердил отправку
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_messages_conv ON messages(conversation_id, created_at);
@@ -122,6 +123,13 @@ class Database:
         self._lock = threading.RLock()
         with self._lock:
             self._conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Дописывает колонки, появившиеся после первого запуска (база на Railway уже существует)."""
+        columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(messages)").fetchall()}
+        if "echo_mid" not in columns:
+            self._conn.execute("ALTER TABLE messages ADD COLUMN echo_mid TEXT")
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self._lock:

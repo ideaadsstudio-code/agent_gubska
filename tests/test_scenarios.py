@@ -498,3 +498,39 @@ async def test_model_told_not_to_greet_when_disclosure_added(env):
     await env.client_says("I want a rose")
     second = env.claude.calls[1]["messages"][-1]["content"][0]["text"]
     assert "Do not greet the client" not in second
+
+
+async def test_own_echo_with_different_mid_after_send_is_ignored(env):
+    """Facebook-режим: номер эха не совпадает с message_id, который вернула отправка."""
+    env.claude.queue(msg(text("Hello!")), msg(text("Sure, what size?")))
+    await env.client_says("Hi")
+    assert env.db.one("SELECT mid FROM messages WHERE author = 'bot'")["mid"] == "out_1"
+    await env.manager_echo(env.sent_texts()[0], mid="aWdfZAG1fcompletelydifferent")
+    assert env.conv().status == "bot"
+    assert not any("Бот на паузе" in t for t in env.tg.texts())
+    await env.client_says("I want a rose")
+    assert len(env.ig.sent) == 2
+
+
+async def test_real_manager_message_still_pauses_after_bot_reply(env):
+    env.claude.queue(msg(text("Hello!")))
+    await env.client_says("Hi")
+    await env.manager_echo(env.sent_texts()[0], mid="echo_1")  # своё эхо
+    await env.manager_echo("Hi, it's Anna, I'll take it from here", mid="echo_2")  # мастер
+    assert env.conv().status == "manager"
+
+
+def test_db_migration_adds_echo_mid(tmp_path):
+    import sqlite3
+
+    from app.db import Database
+
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.execute("CREATE TABLE messages (id INTEGER PRIMARY KEY, conversation_id INTEGER, mid TEXT, author TEXT, "
+                 "text TEXT, attachments TEXT, processed INTEGER, created_at REAL)")
+    conn.commit()
+    conn.close()
+    db = Database(str(path))
+    cols = {r["name"] for r in db.all("PRAGMA table_info(messages)")}
+    assert "echo_mid" in cols

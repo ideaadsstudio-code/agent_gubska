@@ -204,16 +204,18 @@ class Service:
                 self.db.update_conversation(conv.id, scope="personal")
                 return
             conv = self.db.get_or_create_conversation(ev.client_id)
-        if self.db.one("SELECT id FROM messages WHERE mid = ?", (ev.mid,)):
-            return  # наше собственное сообщение, mid уже известен
-        # Эхо может прийти раньше, чем API вернул mid: сверяем по тексту недавних исходящих.
+        if self.db.one("SELECT id FROM messages WHERE mid = ? OR echo_mid = ?", (ev.mid, ev.mid)):
+            return  # наше собственное сообщение, уже сопоставлено
+        # Своё эхо узнаём по тексту недавних исходящих бота. По номеру нельзя: эхо может прийти раньше,
+        # чем API вернул номер, а при подключении через Facebook-страницу номер эха бывает другим.
         own = self.db.one(
-            "SELECT id FROM messages WHERE conversation_id = ? AND author = 'bot' AND mid IS NULL AND text = ? "
-            "AND created_at >= ? ORDER BY id LIMIT 1",
-            (conv.id, ev.text, self.clock() - 300),
+            "SELECT id, mid FROM messages WHERE conversation_id = ? AND author = 'bot' AND echo_mid IS NULL "
+            "AND text = ? AND created_at >= ? ORDER BY id LIMIT 1",
+            (conv.id, ev.text, self.clock() - 600),
         )
         if own:
-            self.db.execute("UPDATE messages SET mid = ? WHERE id = ?", (ev.mid, own["id"]))
+            self.db.execute("UPDATE messages SET echo_mid = ?, mid = COALESCE(mid, ?) WHERE id = ?",
+                            (ev.mid, ev.mid, own["id"]))
             return
 
         if self.settings.topic_filter and conv.scope != "tattoo":
