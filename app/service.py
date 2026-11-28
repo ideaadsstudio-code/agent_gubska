@@ -103,6 +103,21 @@ class Service:
         day = _utc(self.clock()).strftime("%Y-%m-%d")
         self.db.kv_set(f"{key}:{day}", str(int(self.db.kv_get(f"{key}:{day}", "0") or 0) + 1))
 
+    async def _notify_silent(self, conversation_id: int, reason: str) -> None:
+        """Бот промолчал по правилам фильтра: короткое уведомление без текста сообщения, один раз на диалог."""
+        key = f"silent_notified:{conversation_id}"
+        if self.db.kv_get(key):
+            return
+        self.db.kv_set(key, "1")
+        conv = self.db.get_conversation(conversation_id)
+        if not conv:
+            return
+        await self._tg_send(
+            f"🔕 Сообщение от {self._who(conv)}: бот не отвечает ({esc(reason)}). Ответьте в Instagram сами "
+            "или отдайте диалог боту.",
+            {"inline_keyboard": [[{"text": "Отдать боту", "callback_data": f"assign:{conversation_id}"}]]},
+        )
+
     def _leave_to_artist(self, conversation_id: int, scope: str) -> None:
         """Диалог не для бота: забываем его содержимое, бот больше в нём не участвует."""
         self.db.forget_conversation_content(conversation_id)
@@ -160,11 +175,13 @@ class Service:
                 self.db.update_conversation(conv.id, username=username)
         if self.db.is_personal_contact(conv.ig_user_id, username):
             return "personal"
+        old_contact = False
         if self.settings.skip_existing_contacts:
-            # Сообщения, пришедшие сейчас, тоже лежат в Instagram; старыми считаем те, что раньше запуска бота.
-            existed = await self.ig.had_messages_before(conv.ig_user_id, self.settings.bot_launch_at)
-            if existed:
-                return "personal"
+            # Переписка до запуска бота: бот может ответить, если сообщение про тату, но только черновиком.
+            # Сообщения, пришедшие сейчас, тоже лежат в Instagram; старыми считаем те, что раньше запуска.
+            old_contact = bool(await self.ig.had_messages_before(conv.ig_user_id, self.settings.bot_launch_at))
+            if old_contact:
+                self.db.update_conversation(conv.id, review_required=True)
         if not self.classifier:
             return "tattoo"
         all_rows = self.db.all(
@@ -301,9 +318,12 @@ class Service:
                 scope = await self._decide_scope(conv, rows)
                 log.info("dialog #%s: topic decision = %s", conversation_id, scope)
                 if scope in {"personal", "ignored"}:
+                    if scope == "ignored":
+                        await self._notify_silent(conversation_id, "сообщение не про тату")
                     self._leave_to_artist(conversation_id, scope)
                     return
                 if scope == "unknown":
+                    await self._notify_silent(conversation_id, "пока непонятно, про тату ли это")
                     return  # ждём следующих сообщений, пока не станет ясно
                 self.db.update_conversation(conversation_id, scope="tattoo")
                 conv = self.db.get_conversation(conversation_id) or conv
@@ -492,9 +512,9 @@ class Service:
 
     # ------------------------------------------------------------------ доставка
     async def deliver(self, conversation_id: int, text: str) -> None:
-        if self.settings.approval_mode:
-            conv = self.db.get_conversation(conversation_id)
-            assert conv
+        conv = self.db.get_conversation(conversation_id)
+        assert conv
+        if self.settings.approval_mode or conv.review_required:
             cur = self.db.execute(
                 "INSERT INTO drafts(conversation_id, text, created_at) VALUES (?, ?, ?)",
                 (conversation_id, text, self.clock()),
@@ -571,6 +591,14 @@ class Service:
         await self._safe(self.tg.answer_callback(cq.get("id", ""), answer))
 
     async def _run_action(self, action: str, obj_id: int, who: str) -> str:
+        if action == "assign":
+            conv = self.db.get_conversation(obj_id)
+            if not conv:
+                return "Диалог не найден"
+            self.db.update_conversation(conv.id, scope="tattoo", status="bot", needs_disclosure=True)
+            await self._tg_send(f"🤖 {who} отдал боту диалог с {self._who(conv)}")
+            self._schedule(conv.id)  # если сообщения клиента ещё не разобраны, бот ответит на них сразу
+            return "Диалог отдан боту"
         if action in {"take", "return", "confirm"}:
             conv = self.db.get_conversation(obj_id)
             if not conv:

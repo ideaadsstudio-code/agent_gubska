@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS conversations (
     username TEXT,
     status TEXT NOT NULL DEFAULT 'bot',          -- bot | manager
     scope TEXT NOT NULL DEFAULT 'unknown',       -- unknown | tattoo | personal | ignored
+    review_required INTEGER NOT NULL DEFAULT 0,  -- старый контакт: ответы бота только черновиком
     needs_disclosure INTEGER NOT NULL DEFAULT 1,
     last_client_msg_at REAL,
     last_activity_at REAL,
@@ -87,6 +88,7 @@ class Conversation:
     username: str | None
     status: str
     scope: str
+    review_required: bool
     needs_disclosure: bool
     last_client_msg_at: float | None
     last_activity_at: float | None
@@ -104,6 +106,7 @@ def _conv(row: sqlite3.Row | None) -> Conversation | None:
         username=row["username"],
         status=row["status"],
         scope=row["scope"],
+        review_required=bool(row["review_required"]),
         needs_disclosure=bool(row["needs_disclosure"]),
         last_client_msg_at=row["last_client_msg_at"],
         last_activity_at=row["last_activity_at"],
@@ -130,6 +133,9 @@ class Database:
         columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(messages)").fetchall()}
         if "echo_mid" not in columns:
             self._conn.execute("ALTER TABLE messages ADD COLUMN echo_mid TEXT")
+        columns = {r["name"] for r in self._conn.execute("PRAGMA table_info(conversations)").fetchall()}
+        if "review_required" not in columns:
+            self._conn.execute("ALTER TABLE conversations ADD COLUMN review_required INTEGER NOT NULL DEFAULT 0")
 
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Cursor:
         with self._lock:
@@ -174,7 +180,7 @@ class Database:
         for key, value in fields.items():
             if key in {"llm_history", "pending_notes"}:
                 value = json.dumps(value, ensure_ascii=False)
-            elif key == "needs_disclosure":
+            elif key in {"needs_disclosure", "review_required"}:
                 value = int(bool(value))
             cols.append(f"{key} = ?")
             values.append(value)

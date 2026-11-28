@@ -554,8 +554,7 @@ async def test_no_storage_alert_when_db_on_volume(env, settings, monkeypatch):
 
 async def test_bot_command_finds_forgotten_dialog_via_instagram(env, settings):
     settings.topic_filter = True
-    env.ig.existing_contact = True  # диалог отнесён к личным, ник забыт
-    await env.client_says("Hi, how much is a tattoo?")
+    await env.manager_echo("Hi!")  # мастер написала первой: диалог личный, ник не хранится
     assert env.conv().scope == "personal" and env.conv().username is None
     env.ig.username = "pochemy.n.e.t"
     await env.service.handle_telegram({"message": {"chat": {"id": -100}, "text": "/bot @pochemy.n.e.t"}})

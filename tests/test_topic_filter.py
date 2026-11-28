@@ -22,7 +22,9 @@ async def test_personal_chat_ignored_and_forgotten(fenv):
     await fenv.client_says("Аня, привет! Как там мама, выздоровела?")
     conv = fenv.conv()
     assert conv.scope == "ignored"
-    assert fenv.claude.calls == [] and fenv.ig.sent == [] and fenv.tg.sent == []
+    assert fenv.claude.calls == [] and fenv.ig.sent == []
+    # В Telegram только короткое уведомление без текста сообщения.
+    assert len(fenv.tg.sent) == 1 and "мама" not in fenv.tg.texts()[0] and "assign:" in str(fenv.tg.sent[0]["markup"])
     assert stored_texts(fenv) == [] and conv.llm_history == [] and conv.username is None
 
 
@@ -55,11 +57,25 @@ async def test_unclear_too_long_left_to_artist(fenv):
     assert fenv.ig.sent == [] and stored_texts(fenv) == []
 
 
-async def test_existing_contact_skipped_without_classifier(fenv):
+async def test_old_contact_tattoo_question_always_drafted(fenv, settings):
+    settings.approval_mode = False  # даже после тестового периода
     fenv.ig.existing_contact = True
-    await fenv.client_says("Hi, how much is a tattoo?")
-    assert fenv.conv().scope == "personal"
-    assert fenv.haiku.calls == [] and fenv.claude.calls == [] and fenv.ig.sent == []
+    fenv.haiku.queue(topic("tattoo"))
+    fenv.claude.queue(msg(text("Sure! What size?")))
+    await fenv.client_says("Hi again, I want another tattoo")
+    conv = fenv.conv()
+    assert conv.scope == "tattoo" and conv.review_required
+    assert fenv.ig.sent == []  # ничего не ушло клиенту без проверки
+    assert "Черновик ответа" in fenv.tg.texts()[-1]
+
+
+async def test_old_contact_personal_message_left_with_notice(fenv):
+    fenv.ig.existing_contact = True
+    fenv.haiku.queue(topic("not_tattoo"))
+    await fenv.client_says("Аня, привет! Как дела?")
+    assert fenv.conv().scope == "ignored"
+    assert fenv.claude.calls == [] and fenv.ig.sent == []
+    assert len(fenv.tg.sent) == 1 and "Как дела" not in fenv.tg.texts()[0]
 
 
 async def test_existing_contact_check_can_be_disabled(fenv, settings):
@@ -112,7 +128,7 @@ async def test_artist_answers_before_bot_decides(fenv):
     await fenv.client_says("Hi")
     await fenv.manager_echo("Hi! Who's this?")
     assert fenv.conv().scope == "ignored"
-    assert fenv.tg.sent == [] and stored_texts(fenv) == []
+    assert all("Who's this" not in t for t in fenv.tg.texts()) and stored_texts(fenv) == []
 
 
 async def test_personal_command_blocks_contact(fenv):
@@ -152,7 +168,7 @@ async def test_manager_echo_in_personal_chat_not_forwarded(fenv):
     fenv.haiku.queue(topic("not_tattoo"))
     await fenv.client_says("Are we still on for dinner?")
     await fenv.manager_echo("Yes, 8pm!")
-    assert fenv.tg.sent == [] and stored_texts(fenv) == []
+    assert all("8pm" not in t and "dinner" not in t for t in fenv.tg.texts()) and stored_texts(fenv) == []
 
 
 async def test_classifier_cost_counted(fenv):
@@ -175,3 +191,22 @@ async def test_daily_summary_counts_skipped(fenv):
     await fenv.client_says("Hi Anna")
     await fenv.service.daily_summary()
     assert "оставлено мастеру: 1" in fenv.tg.texts()[-1]
+
+
+async def test_silent_notice_sent_once_and_assign_button_answers(fenv):
+    fenv.haiku.queue(topic("unclear"), topic("unclear"))
+    await fenv.client_says("Привет!")
+    await fenv.client_says("👋")
+    notices = [m for m in fenv.tg.sent if "бот не отвечает" in m["text"]]
+    assert len(notices) == 1
+    fenv.claude.queue(msg(text("Здравствуйте! Чем помочь?")))
+    await fenv.press(f"assign:{fenv.conv().id}")
+    assert fenv.conv().scope == "tattoo"
+    # Бот ответил на уже пришедшие сообщения: это ответ, а не первое сообщение.
+    assert len(fenv.ig.sent) == 1 and fenv.sent_texts()[0].endswith("Чем помочь?")
+
+
+async def test_master_first_chat_has_no_notice(fenv):
+    await fenv.manager_echo("Привет, дорогая!")
+    await fenv.client_says("Привет! Как ты?")
+    assert fenv.tg.sent == []
